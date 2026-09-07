@@ -1,0 +1,2521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Polar 采集台 · Polar Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+:root{
+  --paper:#F2F5F6; --surface:#FFFFFF; --surface-2:#F8FAFB;
+  --ink:#12181D; --ink-2:#3D4B53; --muted:#6B7A82;
+  --rule:#D7DFE2; --rule-soft:#E7EDEF; --chip:#EDF2F3;
+  --accent:#0E7C86; --accent-ink:#FFFFFF; --accent-soft:#DCEEF0;
+  --rec:#B3352C; --rec-ink:#FFFFFF; --rec-soft:#F7E5E3;
+  --ok:#2F6B45; --ok-soft:#DFEDE4;
+  --warn:#9A5316; --warn-soft:#F6EADC;
+  --f-display:"Archivo","Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --f-body:"IBM Plex Sans","Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --f-mono:"IBM Plex Mono","Cascadia Mono",Consolas,monospace;
+  --r:4px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0E1315; --surface:#161E21; --surface-2:#1B2427;
+    --ink:#E3EAEC; --ink-2:#B4C1C6; --muted:#84979E;
+    --rule:#2A363A; --rule-soft:#212C30; --chip:#1D272B;
+    --accent:#3FAEB8; --accent-ink:#08191B; --accent-soft:#123033;
+    --rec:#E0736A; --rec-ink:#2A1210; --rec-soft:#2E1A19;
+    --ok:#79C295; --ok-soft:#15271C;
+    --warn:#D9A366; --warn-soft:#2B2115;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0E1315; --surface:#161E21; --surface-2:#1B2427;
+  --ink:#E3EAEC; --ink-2:#B4C1C6; --muted:#84979E;
+  --rule:#2A363A; --rule-soft:#212C30; --chip:#1D272B;
+  --accent:#3FAEB8; --accent-ink:#08191B; --accent-soft:#123033;
+  --rec:#E0736A; --rec-ink:#2A1210; --rec-soft:#2E1A19;
+  --ok:#79C295; --ok-soft:#15271C;
+  --warn:#D9A366; --warn-soft:#2B2115;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+h1,h2,h3{font-family:var(--f-display);margin:0;letter-spacing:-0.01em}
+button,input,select{font-family:inherit;font-size:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- app frame ---------- */
+.app{max-width:1320px;margin:0 auto;padding:0 20px 64px}
+
+.topbar{display:flex;align-items:center;gap:16px;padding:18px 0 14px}
+.brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+.brand h1{font-size:19px;font-weight:700}
+.brand .ver{font-family:var(--f-mono);font-size:11px;color:var(--muted);white-space:nowrap}
+.topbar .spacer{margin-left:auto}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:var(--r);overflow:hidden;background:var(--surface)}
+.seg button{background:transparent;border:0;padding:5px 11px;cursor:pointer;font-size:12px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+
+/* ---------- status bar ---------- */
+.status{position:sticky;top:0;z-index:30;background:var(--surface);border:1px solid var(--rule);border-radius:var(--r);
+  display:flex;align-items:center;gap:0;padding:0;overflow-x:auto;box-shadow:0 1px 0 rgba(0,0,0,.03)}
+.status .cell{padding:11px 18px;border-right:1px solid var(--rule-soft);white-space:nowrap;min-width:0}
+.status .cell:last-child{border-right:0}
+.status .lab{font-family:var(--f-mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);display:block}
+.status .val{font-family:var(--f-mono);font-size:15px;font-weight:500;font-variant-numeric:tabular-nums;display:block;margin-top:1px}
+.status .val.dim{color:var(--muted);font-weight:400}
+.state{display:flex;align-items:center;gap:9px;padding:11px 18px;border-right:1px solid var(--rule-soft)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+.state.rec .dot{background:var(--rec);animation:pulse 1.6s ease-in-out infinite}
+.state.armed .dot{background:var(--warn)}
+.state.done .dot{background:var(--ok)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.state.rec .dot{animation:none}}
+.state .txt{font-family:var(--f-display);font-weight:600;font-size:13px}
+.state.rec .txt{color:var(--rec)}
+.state.done .txt{color:var(--ok)}
+.status .grow{margin-left:auto}
+.status .cell.path{font-family:var(--f-mono);font-size:11px;color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- layout ---------- */
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 336px;gap:20px;margin-top:20px;align-items:start}
+@media (max-width:1080px){.cols{grid-template-columns:1fr}}
+
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--r)}
+.card>h2{font-size:13px;font-weight:700;padding:13px 16px;border-bottom:1px solid var(--rule-soft);
+  display:flex;align-items:center;gap:8px}
+.card>h2 .hint{margin-left:auto;font-family:var(--f-mono);font-size:10.5px;font-weight:400;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.card .body{padding:14px 16px}
+aside .card{margin-bottom:16px}
+
+/* ---------- buttons ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  background:var(--surface);color:var(--ink);border:1px solid var(--rule);border-radius:var(--r);
+  padding:7px 13px;cursor:pointer;font-weight:500;font-size:13px;transition:background .12s,border-color .12s}
+.btn:hover:not(:disabled){background:var(--chip)}
+.btn:disabled{opacity:.42;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover:not(:disabled){filter:brightness(1.08);background:var(--accent)}
+.btn.rec{background:var(--rec);border-color:var(--rec);color:var(--rec-ink);font-weight:600}
+.btn.rec:hover:not(:disabled){filter:brightness(1.08);background:var(--rec)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted);padding:5px 8px}
+.btn.ghost:hover:not(:disabled){background:var(--chip);color:var(--ink)}
+.btn.sm{padding:4px 9px;font-size:12px}
+.btn.block{width:100%}
+.btn-row{display:flex;flex-wrap:wrap;gap:8px}
+
+/* ---------- empty state ---------- */
+.empty{background:var(--surface);border:1px dashed var(--rule);border-radius:var(--r);padding:44px 28px;text-align:center}
+.empty h3{font-size:16px;margin-bottom:6px}
+.empty p{color:var(--muted);margin:0 auto 20px;max-width:44ch}
+.empty ol{text-align:left;max-width:400px;margin:22px auto 0;padding-left:0;list-style:none;counter-reset:s}
+.empty ol li{counter-increment:s;position:relative;padding-left:30px;margin-bottom:9px;color:var(--ink-2);font-size:13px}
+.empty ol li::before{content:counter(s);position:absolute;left:0;top:1px;width:19px;height:19px;border-radius:50%;
+  background:var(--accent-soft);color:var(--accent);font-family:var(--f-mono);font-size:11px;font-weight:600;
+  display:flex;align-items:center;justify-content:center}
+
+/* ---------- device card ---------- */
+#deviceList{display:flex;flex-direction:column;gap:16px}
+.dev{background:var(--surface);border:1px solid var(--rule);border-radius:var(--r);overflow:hidden}
+.dev.live{border-color:var(--accent)}
+.dev-head{display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid var(--rule-soft);flex-wrap:wrap}
+.dev-name{font-family:var(--f-mono);font-size:13px;font-weight:600}
+.badge{font-family:var(--f-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:2px 7px;border-radius:2px;background:var(--chip);color:var(--muted);border:1px solid var(--rule)}
+.badge.on{background:var(--rec-soft);color:var(--rec);border-color:transparent}
+.dev-head .grow{margin-left:auto}
+.dev-stats{display:flex;gap:18px;font-family:var(--f-mono);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.dev-stats b{color:var(--ink);font-weight:500}
+.dev-body{display:grid;grid-template-columns:minmax(0,1fr) 196px;gap:0}
+@media (max-width:720px){.dev-body{grid-template-columns:1fr}}
+.dev-plot{padding:8px 4px 8px 8px;min-width:0;min-height:158px;overflow:hidden}
+.dev-side{border-left:1px solid var(--rule-soft);padding:12px 14px;display:flex;flex-direction:column;gap:11px}
+@media (max-width:720px){.dev-side{border-left:0;border-top:1px solid var(--rule-soft)}}
+.streams{display:flex;flex-direction:column;gap:6px}
+.streams label{display:flex;align-items:center;gap:7px;font-family:var(--f-mono);font-size:12px;cursor:pointer;white-space:nowrap}
+.streams input{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+.readout{font-family:var(--f-mono);font-size:11px;color:var(--muted);line-height:1.7;font-variant-numeric:tabular-nums}
+.readout b{color:var(--ink);font-weight:500;font-size:13px}
+.gain{display:flex;gap:5px;align-items:center}
+.gain .lb{font-family:var(--f-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:auto}
+
+/* ---------- sync table ---------- */
+.tblwrap{overflow-x:auto}
+table.data{width:100%;border-collapse:collapse;font-family:var(--f-mono);font-size:11.5px;font-variant-numeric:tabular-nums}
+table.data th{text-align:right;font-weight:500;color:var(--muted);font-size:10px;letter-spacing:.05em;text-transform:uppercase;
+  padding:6px 8px;border-bottom:1px solid var(--rule);white-space:nowrap}
+table.data th:first-child,table.data td:first-child{text-align:left}
+table.data td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--rule-soft);white-space:nowrap}
+table.data tr:last-child td{border-bottom:0}
+table.data .good{color:var(--ok)}
+table.data .warn{color:var(--warn)}
+table.data .bad{color:var(--rec)}
+.tbl-empty{color:var(--muted);font-size:12.5px;padding:6px 0}
+
+/* ---------- markers ---------- */
+.mk-input{display:flex;gap:7px;margin-bottom:11px}
+.mk-input input{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--rule);border-radius:var(--r);padding:6px 9px}
+#Markers{display:flex;flex-wrap:wrap;gap:7px;border:0}
+#Markers button{background:var(--accent-soft);border:1px solid transparent;color:var(--accent);
+  border-radius:var(--r);padding:7px 13px;cursor:pointer;font-weight:600;font-size:13px;font-family:var(--f-body)}
+#Markers button:hover{filter:brightness(.96)}
+#Markers:empty::after{content:attr(data-empty);color:var(--muted);font-size:12.5px;font-family:var(--f-body)}
+.mk-tools{display:flex;gap:5px;margin-top:11px;padding-top:10px;border-top:1px solid var(--rule-soft)}
+
+/* ---------- marker log ---------- */
+#list_timing{width:100%;border-collapse:collapse;font-family:var(--f-mono);font-size:11.5px}
+#list_timing th{text-align:left;font-weight:500;color:var(--muted);font-size:10px;letter-spacing:.05em;
+  text-transform:uppercase;padding:6px 8px;border-bottom:1px solid var(--rule)}
+#list_timing td{padding:5px 8px;border-bottom:1px solid var(--rule-soft);white-space:nowrap}
+#list_timing tr:nth-child(n+2) td:last-child{font-weight:600;color:var(--accent)}
+
+/* ---------- misc ---------- */
+.field{margin-bottom:12px}
+.field:last-child{margin-bottom:0}
+.field .lab{font-family:var(--f-mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
+.note{font-size:12px;color:var(--muted);line-height:1.5;margin-top:9px}
+.banner{border-radius:var(--r);padding:10px 13px;font-size:12.5px;margin-bottom:14px;display:none;line-height:1.5}
+.banner.show{display:block}
+.banner.warn{background:var(--warn-soft);color:var(--warn);border:1px solid transparent}
+.danger-zone{border-top:1px solid var(--rule-soft);margin-top:12px;padding-top:11px}
+.hidden{display:none !important}
+#Combined{position:absolute;left:-9999px;top:0;height:300px;width:800px;visibility:hidden;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand">
+      <h1 data-i18n="app.name">Polar 采集台</h1>
+      <span class="ver">v1.1 · engine 0903 · +EDA</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="seg" role="group" aria-label="Theme">
+      <button type="button" id="thLight" onclick="UI.setTheme('light')" data-i18n="theme.light">浅色</button>
+      <button type="button" id="thDark" onclick="UI.setTheme('dark')" data-i18n="theme.dark">深色</button>
+    </div>
+    <div class="seg" role="group" aria-label="Language">
+      <button type="button" id="lgZh" onclick="UI.setLang('zh')">中文</button>
+      <button type="button" id="lgEn" onclick="UI.setLang('en')">EN</button>
+    </div>
+  </div>
+
+  <div class="status">
+    <div class="state" id="stateBox">
+      <span class="dot"></span><span class="txt" id="stateTxt" data-i18n="state.idle">待机</span>
+    </div>
+    <div class="cell">
+      <span class="lab" data-i18n="st.elapsed">已录时长</span>
+      <span class="val" id="stElapsed">--:--</span>
+    </div>
+    <div class="cell">
+      <span class="lab" data-i18n="st.devices">设备</span>
+      <span class="val" id="stDevices">0</span>
+    </div>
+    <div class="cell">
+      <span class="lab" data-i18n="st.samples">已采样本</span>
+      <span class="val" id="stSamples">0</span>
+    </div>
+    <div class="cell">
+      <span class="lab" data-i18n="st.files">已落盘</span>
+      <span class="val" id="stFiles">0</span>
+    </div>
+    <div class="cell path grow" id="stTarget" data-i18n="st.notarget">未选输出位置</div>
+  </div>
+
+  <div class="banner warn" id="plotlyBanner">
+    <span data-i18n="warn.plotly">图形库未能加载（可能离线）。数据采集与落盘不受影响，只是没有实时波形。</span>
+  </div>
+
+  <div class="cols">
+    <main>
+      <div class="empty" id="emptyState">
+        <h3 data-i18n="empty.title">还没有连接传感器</h3>
+        <p data-i18n="empty.sub">这个页面用 Web Bluetooth 直接和 Polar H10 / Verity Sense、天琴座皮肤电通讯，串口 GSR 走 Web Serial，都不需要装任何东西。请用 Chrome 或 Edge 打开。</p>
+        <div class="btn-row" style="justify-content:center">
+          <button class="btn primary" id="Sense" onclick="addDevice('')" data-i18n="btn.connect">连接传感器</button>
+          <button class="btn" id="btnEDA" onclick="EDA.connect()" data-i18n="btn.eda">连接皮肤电 · 天琴座</button>
+          <button class="btn" id="btnGSR" onclick="GSR.connect()" data-i18n="btn.gsr">连接皮肤电 · 串口 GSR</button>
+        </div>
+        <ol>
+          <li data-i18n="empty.s1">先在右侧「输出」里选好保存文件夹 —— 不选就只存在内存里，刷新即丢</li>
+          <li data-i18n="empty.s2">点上面的按钮，在弹窗里选你的设备；要连多台就点多次</li>
+          <li data-i18n="empty.s3">勾选需要的数据流，然后点「开始录制」</li>
+        </ol>
+      </div>
+      <div id="deviceList"></div>
+      <div id="streams" class="hidden"></div>
+      <!-- 引擎会往这里写 autosave 状态文本；状态栏用的是 UI 层自己按 autoSave 状态渲染的 i18n 版本，这里只做兼容占位 -->
+      <span id="autosaveStatus" class="hidden"></span>
+      <div id="graphsdiv" class="hidden"></div>
+
+      <section class="card">
+        <h2><span data-i18n="sec.sync">时钟同步</span><span class="hint" data-i18n="sync.hint">实时</span></h2>
+        <div class="body">
+          <div class="tblwrap" id="syncPanel"></div>
+          <p class="note" data-i18n="sync.note">jitter 两列相对窗口内最小到达差，与表内时钟是否对过无关，可直接横向比较设备。</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="sec.mklog">标记记录</h2>
+        <div class="body">
+          <div class="tblwrap">
+            <table id="list_timing">
+              <tr>
+                <th data-i18n="mklog.time">时刻</th>
+                <th data-i18n="mklog.unix">UNIX</th>
+                <th data-i18n="mklog.rel">相对秒</th>
+                <th data-i18n="mklog.name">标记</th>
+              </tr>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside>
+      <section class="card">
+        <h2 data-i18n="sec.control">采集控制</h2>
+        <div class="body">
+          <div class="btn-row" style="margin-bottom:10px">
+            <button class="btn rec block" id="btnRec" onclick="UI.toggleRecord()" disabled data-i18n="btn.start">开始录制</button>
+          </div>
+          <button class="btn block" id="btnAddDev" onclick="addDevice('')" data-i18n="btn.addDevice">+ 连接另一台传感器</button>
+          <div class="btn-row" style="margin-top:8px">
+            <button class="btn sm" onclick="EDA.connect()" data-i18n="btn.eda.short">+ 天琴座皮肤电</button>
+            <button class="btn sm" onclick="GSR.connect()" data-i18n="btn.gsr.short">+ 串口 GSR</button>
+          </div>
+          <details style="margin-top:10px">
+            <summary style="cursor:pointer;font-size:12px;color:var(--muted)" data-i18n="gsr.opts">串口 GSR 参数</summary>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <label style="flex:1;font-size:12px">
+                <span class="lab" data-i18n="gsr.baud">波特率</span>
+                <select id="gsrBaud" style="width:100%;background:var(--surface-2);border:1px solid var(--rule);border-radius:var(--r);padding:5px 7px">
+                  <option>115200</option><option>9600</option><option>57600</option><option>230400</option><option>921600</option>
+                </select>
+              </label>
+              <label style="flex:1;font-size:12px">
+                <span class="lab" data-i18n="gsr.bits">ADC 满量程</span>
+                <select id="gsrBits" style="width:100%;background:var(--surface-2);border:1px solid var(--rule);border-radius:var(--r);padding:5px 7px">
+                  <option value="1023">1023 (10bit / UNO)</option>
+                  <option value="4095">4095 (12bit / Pico·ESP32)</option>
+                  <option value="65535">65535 (16bit)</option>
+                </select>
+              </label>
+            </div>
+            <label style="display:block;font-size:12px;margin-top:8px">
+              <span class="lab" data-i18n="gsr.pol">极性（µS 随 ADC 往哪走）</span>
+              <select id="gsrPol" style="width:100%;background:var(--surface-2);border:1px solid var(--rule);border-radius:var(--r);padding:5px 7px">
+                <option value="up" data-i18n="gsr.pol.up">ADC↑ = 电导↑（2026-09-04 实测你这块是这个）</option>
+                <option value="down" data-i18n="gsr.pol.down">ADC↑ = 电导↓（Grove 原式）</option>
+              </select>
+            </label>
+          </details>
+          <p class="note" id="ctlHint" data-i18n="ctl.hint.nodev">先连接至少一台传感器。</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2><span data-i18n="sec.output">输出</span><span class="hint" id="outMode">—</span></h2>
+        <div class="body">
+          <div class="field">
+            <button class="btn primary block" onclick="pickFolderAndStart()" data-i18n="btn.pickFolder">选择输出文件夹</button>
+            <p class="note" data-i18n="out.note">每 60 秒把新增数据增量写入该文件夹；停止时另外合并出一份 FULL 文件。不选文件夹会退化成浏览器自动下载。</p>
+          </div>
+          <div class="danger-zone">
+            <div class="btn-row">
+              <button class="btn sm" onclick="downloadData()" data-i18n="btn.exportNow">导出当前缓冲</button>
+              <button class="btn sm" onclick="UI.confirmClear()" data-i18n="btn.clear">清空缓冲</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="sec.markers">事件标记</h2>
+        <div class="body">
+          <div class="mk-input">
+            <input type="text" id="markername" data-i18n-ph="mk.ph" placeholder="标记名称，如「起步」">
+            <button class="btn" onclick="AddMarker()" data-i18n="btn.mkAdd">添加</button>
+          </div>
+          <div id="Markers" data-i18n-attr="data-empty|mk.empty" data-empty="还没有标记按钮"></div>
+          <div class="mk-tools">
+            <button class="btn ghost sm" onclick="SaveMarkers()" data-i18n="btn.mkSave">保存集合</button>
+            <button class="btn ghost sm" onclick="LoadMarkers()" data-i18n="btn.mkLoad">载入</button>
+            <button class="btn ghost sm" onclick="ClearMarkers()" data-i18n="btn.mkClear">清空</button>
+          </div>
+          <input type="file" class="hidden" id="selectedfile" name="files[]" accept=".txt">
+        </div>
+      </section>
+
+    </aside>
+  </div>
+</div>
+
+<script>
+// ★ 2026-09-03：原代码读一个 id=Combined 的隐藏 div 的 clientHeight 来定 RDP 抽稀粒度。
+// 新布局里没有这个元素，改成常量，取值与原来那个 div 的高度一致，数值行为完全不变。
+const COMBINED_H = 300;
+
+/* =========================
+   Polar H10 & Verity Sense
+   — per-packet clock sync + minute autosave (split PPG / ACC CSV)
+   ========================= */
+
+const PPG_CHANNEL_NAMES = ['PPG0','PPG1','PPG2','ambient'];
+const EPOCH_2000_TO_1970 = 946684800000;
+const SYNC_WINDOW = 300;              // live display window; CSV keeps full set
+const AUTOSAVE_INTERVAL_MS = 60_000;  // every minute
+
+// Globals
+var starttime = {};         // device start (ms since 2000)
+var systemStartUTC = {};    // first packet arrival UTC ms
+lineformat=[]; newline="\r\n";
+defineLineformats();
+Stream_Types=["ECG","PPG","ACC",,,,,,,"SDK"];
+Control_Types=["","Settings request","Start measurement","Stop measurement"];
+Device_Errors=["Success","Not supported","Stream not known","Stream not supported","Invalid length","Invalid parameter","Already doing it!","Invalid Resolution","Invalid sample rate","Invalid range","Invalid MTU","Invalid channels","Invalid state","Sorry, charging"];
+
+// 导出时忽略这些通道（即使存在）
+download_ignore_time=['PPGsum_f','acc_x','acc_y','acc_z','timingend','timing_smooth','timingstart'];
+
+// 不导出的一些派生/降采样通道
+const RAW_EXCLUDE = new Set([
+  'PPG_f_reduced','PPGrate','PPGacceleration','PPGrate_reduced',
+  'PPGpeak','PPGstart','PPGend',
+  'acc_v_reduced','ECG_reduced'
+]);
+
+// ★ 导出分组：PPG 与 ACC（ACC 同时保留 acc_x/acc_y/acc_z/acc_v）
+const PPG_EXPORT_COLUMNS = ['PPG0','PPG1','PPG2','ambient','PPGsum'];
+const ACC_EXPORT_COLUMNS = ['acc_x','acc_y','acc_z','acc_v'];
+// ★ 2026-09-02 新增：ECG 之前没有任何导出路径（采得到、画得出，但写不进 CSV）
+const ECG_EXPORT_COLUMNS = ['ECG'];
+
+// ★ 所有导出路径（自动落盘 / FULL / 手动下载）都从这一张表走，
+//    以后再加流只改这里，不会再出现"某个流忘了导出"的情况。
+const EXPORT_GROUPS = [
+  { key:'PPG', cols:PPG_EXPORT_COLUMNS },
+  { key:'ACC', cols:ACC_EXPORT_COLUMNS },
+  { key:'ECG', cols:ECG_EXPORT_COLUMNS },
+];
+
+derived_data=['PPGpeak','PPGstart','PPGend','QRS'];
+acc_range=0x04; H10_rate=0xC8; Sense_rate=416; acc_resolution=0x10;
+var samplerate=176;
+dataobject={};
+layoutCombined=[];
+obj=[]; plotlyOut=0;
+var updatecombined=[];
+
+const streams= {
+  ACC_H10:{name:'ACC_H10',id:2,type:"Accelerometer",code_start:[0x02,0x01,acc_range,0x00,0x00,0x01,H10_rate,0x00,0x01,0x01,acc_resolution,0x00]},
+  SDK:{name:'SDK',id:9,type:"SDK mode",code_start:[]},
+  PPG:{name:'PPG',id:1,type:"photoplethysmogram",code_start:[0x00,0x01,samplerate,0x00,0x01,0x01,0x16,0x00,0x04,0x01,0x04]},
+  ACC_Sense:{name:'ACC_Sense',id:2,type:"Accelerometer",code_start:[0x02,0x01,acc_range,0x00,0x00,0x01,0xA0,0x01,0x01,0x01,acc_resolution,0x00,4,1,3]},
+  ECG:{name:'ECG',id:0,type:"Electrocardiogram",code_start:[0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]}
+};
+
+PMD_SERVICE = "fb005c80-02e7-f387-1cad-8acd2d8df0c8";
+PMD_CONTROL = "fb005c81-02e7-f387-1cad-8acd2d8df0c8";
+PMD_DATA    = "fb005c82-02e7-f387-1cad-8acd2d8df0c8";
+
+var traces=[]; var PPGvalues=[];
+yscale_ECG_default=2000; yscale_PPG_default=30000; yscale=[];
+datastore=[[],[],[]];
+var layoutCombinedg={autosize:false,width:400,height:150,margin:{l:0,r:10,b:0,t:0,pad:0}, xaxis:{showticklabels:false}, yaxis:{showticklabels:false},legend:{"orientation":"h",font:{family:'sans-serif',size:8}}};
+layoutCombinedg.yaxis.range=[-yscale_PPG_default, yscale_PPG_default];
+
+const devices={Sense:{type:'Sense', output:['SDK','PPG','ACC_Sense']},H10:{name:'H10', output:['ECG','ACC_H10']}};
+
+function addTrace(device,id){traces[device][id]={...lineformat[id]};traces[device][id]['x']=[];traces[device][id]['y']=[];}
+function defineLineformats(){
+  red='255,0,0'; green='0,255,0'; blue='0,0,255'; cyan='0,255,255';
+  lineformat.ECG=defineLine(red,'ECG','lines');
+  lineformat.ECG_reduced=defineLine(red,'ECG_reduced','lines');
+  lineformat.acc_x=defineLine(red,'x','lines');
+  lineformat.acc_y=defineLine(green,'y','lines');
+  lineformat.acc_z=defineLine(green,'z','lines');
+  lineformat.PPG0=defineLine(red,'0','lines');
+  lineformat.PPG1=defineLine(green,'1','lines');
+  lineformat.PPG2=defineLine(blue,'2','lines');
+  lineformat.ambient = {type:'scattergl', mode:'lines',line:{color:'255,0,255', width:1}, name:'ambient', x:[], y:[], yaxis:'y2'};
+  lineformat.PPGsum=defineLine(cyan,'PPG','lines');
+  lineformat.acc_v=defineLine(blue,'v_H10','lines');
+  lineformat.acc_v_reduced=defineLine(blue,'acc_v_reduced','lines');
+  lineformat.QRS=defineLine('75,0,75','QRS','markers');
+  lineformat.PPGpeak=defineLine('75,0,75','PPGpeak','markers');
+  lineformat.PPGstart=defineLine('75,75,75','PPGstart','markers');
+  lineformat.PPGend=defineLine('0,75, 75','PPGend','markers');
+  lineformat.PPGsum_f=defineLine('0,128,128','PPGsum_f','lines');
+  lineformat.PPG_f_reduced=defineLine('0,255,0','PPG_f_reduced','lines');
+  lineformat.PPGrate=defineLine('128,0,0','PPGrate','lines');
+  lineformat.PPGacceleration=defineLine('0,0,0','PPGrate','lines');
+  lineformat.PPGrate_reduced=defineLine('0,128,0','PPGrate_reduced','lines');
+  lineformat.timing=defineLine('128,128,128','Interval','markers'); lineformat.timing.marker={opacity:0.5,size:5};
+  lineformat.timingstart=defineLine('75,128,75','Interval','markers');
+  lineformat.timingend=defineLine('255,128,75','Interval','markers');
+  lineformat.timing_smooth=defineLine('255,0,0','Interval','lines');
+}
+
+function buildDropCsvSection(){
+  const NL = newline;
+  const d = (window.dropLog||[]);
+  if(!d.length) return 'LINK EVENTS (none — 全程无掉线)' + NL + NL;
+  const lines = ['LINK EVENTS (unix_host_ms 同一根时间轴；数据缺口的成因记录)',
+                 'unix_host_ms,iso_utc,device,event,detail'];
+  for(const k of d) lines.push(`${k.t},${k.iso},${k.dev},${k.ev},${String(k.detail||'').replace(/,/g,' ')}`);
+  return lines.join(NL) + NL + NL;
+}
+
+function buildMarkerCsvSection(){
+  const NL = newline;
+  const m = (window.markerLog||[]);
+  if(!m.length) return 'MARKERS (none)' + NL + NL;
+  const lines = ['MARKERS (unix_host_ms 同一根时间轴，可直接和数据行对齐)',
+                 'unix_host_ms,iso_utc,name'];
+  for(const k of m) lines.push(`${k.unix_ms},${k.iso},${String(k.name).replace(/,/g,' ')}`);
+  return lines.join(NL) + NL + NL;
+}
+
+/* ---------- 统一主机时间轴 ----------
+   ★ 2026-09-04 实录发现：H10 的内部 RTC 从没被对过表，写出来的 unix_dev_ms 是 2019 年，
+   和天琴座（真实 POSIX 时间）差了 7.7 年，跨设备根本对不齐。每台设备的"自己的时钟"
+   彼此无关，唯一的公共参照是这台电脑的墙上时钟。
+   hostOffset 用首包锚点把设备时钟平移到主机时钟：
+       unix_host_ms = dev_ms + EPOCH_2000_TO_1970 + hostOffset(dev)
+   常数项里含一次 BLE/串口传输延迟（EDA 实测约 220 ms），秒级对齐足够；
+   要更准就用 CSV 顶部 SYNC 表里的 offset/skew 做线性校正。
+   unix_dev_ms 原样保留，用来诊断设备自己的时钟。 */
+function hostOffset(dev){
+  if (systemStartUTC[dev] == null || starttime[dev] == null) return 0;
+  return systemStartUTC[dev] - (starttime[dev] + EPOCH_2000_TO_1970);
+}
+function hostMs(dev, dev_ms){
+  return (dev_ms + EPOCH_2000_TO_1970 + hostOffset(dev)).toFixed(3);
+}
+
+/* ---------- Per-packet clock sync ---------- */
+const syncStore = {};
+function ensureSync(dev, stream){
+  if(!syncStore[dev]) syncStore[dev] = {};
+  if(!syncStore[dev][stream]) syncStore[dev][stream] = { pairs:[], pairsAll:[], est:null, stats:null };
+  return syncStore[dev][stream];
+}
+function pushSyncPair(dev, stream, dev_ms_since_2000, sys_ms){
+  const S = ensureSync(dev, stream);
+  const x = dev_ms_since_2000 + EPOCH_2000_TO_1970;
+  const y = sys_ms;
+
+  S.pairs.push([x,y]);
+  S.pairsAll.push([x,y]);
+  if(S.pairs.length > SYNC_WINDOW) S.pairs.shift();
+
+  // Stable linear fit using mean-centering
+  const arr = S.pairs;
+  const n = arr.length;
+  if(n >= 2){
+    let meanX = 0, meanY = 0;
+    for(const [xx,yy] of arr){ meanX += xx; meanY += yy; }
+    meanX /= n; meanY /= n;
+
+    let varX = 0, covXY = 0;
+    for(const [xx,yy] of arr){
+      const dx = xx - meanX, dy = yy - meanY;
+      varX += dx*dx; covXY += dx*dy;
+    }
+
+    let skew = 1, offset = meanY;
+    if (varX !== 0){
+      skew = covXY / varX;
+      offset = meanY - skew * meanX;
+    }
+    S.est = {offset, skew};
+
+    const diffs = arr.map(([xx,yy]) => yy - xx).sort((a,b)=>a-b);
+    const p05 = diffs[Math.max(0, Math.floor(diffs.length*0.05)-1)];
+    const med = diffs[Math.floor(diffs.length*0.5)];
+    // ★ 2026-09-02 新增：p05/median 是 sys-dev 的原始差，只有在表内时钟对过时才等于真实延迟。
+    //   2026-09-02 那次 H10 的 RTC 停在 2019 年，这两列成了 2.4e11 这种废数。
+    //   下面这两个"相对最小值"的量与表内时钟绝对值无关，多设备压测时可以直接横向比。
+    const p95 = diffs[Math.min(diffs.length-1, Math.floor(diffs.length*0.95))];
+    const mn  = diffs[0];
+    S.stats = {p05, median: med, p95, min: mn, meanX};
+  }
+}
+function renderSyncPanel(){
+  // ★ 2026-09-03 UI 重做：原来往 #syncPanel 里塞一坨 white-space:pre 的纯文本。
+  //   改为渲染成带阈值配色的表格（数学完全不变，只是换了呈现）。
+  UI.syncTable();
+}
+function buildSyncCsvSection(summaryOnly=false, syncDelta=null){
+  const NL = newline;
+  const lines = [];
+  lines.push('SYNC summary (sys ~= offset + skew * unix(dev_ms))');
+  lines.push('Device,Stream,offset_ms,skew,offset_at_mean_ms,p05_latency_ms,median_latency_ms,jitter_median_ms,jitter_p95_ms');
+  for(const dev in syncStore){
+    for(const stream in syncStore[dev]){
+      const S = syncStore[dev][stream];
+      const off = (S.est?.offset ?? '');
+      const skw = (S.est?.skew ?? '');
+      const meanX = (S.stats?.meanX ?? 0);
+      const eff = (S.est ? (S.est.offset + (S.est.skew - 1) * meanX) : '');
+      const p05 = (S.stats?.p05 ?? '');
+      const med = (S.stats?.median ?? '');
+      // ★ 相对窗口内最小到达差的抖动，与表内时钟是否对过无关
+      const jmed = (S.stats ? (S.stats.median - S.stats.min).toFixed(3) : '');
+      const j95  = (S.stats ? (S.stats.p95    - S.stats.min).toFixed(3) : '');
+      lines.push(`${dev},${stream},${off},${skw},${eff},${p05},${med},${jmed},${j95}`);
+    }
+  }
+  lines.push('');
+  if (!summaryOnly){
+    lines.push('SYNC per-packet (one line per BLE packet)');
+    lines.push('Device,Stream,PacketIdx,unix_dev_ms,sys_utc_ms,diff_ms');
+    for(const dev in syncStore){
+      for(const stream in syncStore[dev]){
+        const arr = syncStore[dev][stream].pairsAll;
+        const startIdx = syncDelta?.[dev]?.[stream] ?? 0;
+        for(let i=startIdx;i<arr.length;i++){
+          const [x,y] = arr[i];
+          const diff = y - x;
+          lines.push(`${dev},${stream},${i},${x.toFixed(3)},${y.toFixed(3)},${diff.toFixed(3)}`);
+        }
+      }
+    }
+    lines.push('');
+  }
+  return lines.join(NL) + NL;
+}
+
+/* ---------- Autosave (only while recording) ---------- */
+let autoSave = {
+  dirHandle: null,
+  timer: null,
+  running: false,
+  firstStreamByDev: {},
+  lastRowIdxByDev: {},               // legacy cursor (safe to keep)
+  lastRowIdxByDevByKey: { PPG: {}, ACC: {}, ECG: {} }, // ★ 分组游标
+  lastSyncIdx: {},
+  sessionStart: null
+};
+const FIRST_STREAM_PRIORITY = ['ECG','PPG0','PPGsum','acc_v','acc_x','PPG1','PPG2','ambient'];
+
+// recording state: only autosave while any stream is ON
+let streamFlags = {};        // streamFlags[device][streamName] = true/false
+let recordingActive = false; // any stream ON?
+
+function setStreamFlag(dev, streamName, on){
+  if(!streamFlags[dev]) streamFlags[dev] = {};
+  streamFlags[dev][streamName] = !!on;
+  recomputeRecordingActive();
+}
+function recomputeRecordingActive(){
+  const was = recordingActive;
+  recordingActive = Object.values(streamFlags).some(m => Object.values(m).some(Boolean));
+  // when recording stops -> flush once (partial minute + final full-file)
+  if (was && !recordingActive){
+    flushAutosaveNow({ alsoSaveFull: true });
+  }
+}
+
+function chooseFirstStream(dev, for_streams){
+  const prev = autoSave.firstStreamByDev[dev];
+  if (prev && for_streams.includes(prev) && dataobject[dev]?.[prev]) return prev;
+  for (const s of FIRST_STREAM_PRIORITY){
+    if (for_streams.includes(s) && dataobject[dev]?.[s]) {
+      autoSave.firstStreamByDev[dev] = s;
+      return s;
+    }
+  }
+  const any = Object.keys(dataobject[dev]||{}).find(k=>for_streams.includes(k));
+  autoSave.firstStreamByDev[dev] = any;
+  return any;
+}
+
+// 过滤出当前确实有数据的流，避免空列/空文件
+function streamsPresent(for_streams){
+  const present = [];
+  for (const s of for_streams){
+    for (const dev in dataobject){
+      if (dataobject[dev]?.[s]?.x?.length){ present.push(s); break; }
+    }
+  }
+  return present;
+}
+
+// 判断某个分组是否有“新行”
+function hasNewRows(for_streams, lastRowIdxByDevMap){
+  for (const dev in dataobject){
+    const first = chooseFirstStream(dev, for_streams);
+    if (!first) continue;
+    const xFirst = dataobject[dev][first]?.x || [];
+    const prevIdx = (lastRowIdxByDevMap?.[dev] ?? 0);
+    if (xFirst.length > prevIdx) return true;
+  }
+  return false;
+}
+
+function timestampForFilename(d=new Date()){
+  const pad = n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+async function verifyPermission(dirHandle){
+  const opts = { mode: 'readwrite' };
+  if (await dirHandle.queryPermission(opts) === 'granted') return true;
+  if (await dirHandle.requestPermission(opts) === 'granted') return true;
+  return false;
+}
+async function pickFolderAndStart(){
+  try{
+    if (!('showDirectoryPicker' in window)){
+      alert('Your browser does not support writing to a folder. Will fall back to auto-download every minute. Prefer Chrome/Edge.');
+      startAutoSaveFallbackDownloads();
+      return;
+    }
+    const handle = await window.showDirectoryPicker({ id: 'polar-autosave', mode: 'readwrite' });
+    if (!(await verifyPermission(handle))) { alert('Permission denied.'); return; }
+    autoSave.dirHandle = handle;
+    autoSave.sessionStart = new Date();
+    startAutoSaveTimer();
+    document.getElementById('autosaveStatus').textContent = 'Autosave: running (to folder)';
+  }catch(e){
+    console.error(e);
+    alert('Folder selection failed: ' + e.message);
+  }
+}
+function stopAutoSave(){
+  if (autoSave.timer){ clearInterval(autoSave.timer); autoSave.timer = null; }
+  autoSave.running = false;
+  // flush final partial minute and also write a FULL file
+  flushAutosaveNow({ alsoSaveFull: true });
+  document.getElementById('autosaveStatus').textContent = 'Autosave: stopped';
+}
+function startAutoSaveTimer(){
+  if (autoSave.timer) clearInterval(autoSave.timer);
+  autoSave.running = true;
+  autoSave.timer = setInterval(()=>onAutoSaveTick(false), AUTOSAVE_INTERVAL_MS);
+  onAutoSaveTick(false); // first shot
+}
+function startAutoSaveFallbackDownloads(){
+  autoSave.dirHandle = null;
+  autoSave.sessionStart = new Date();
+  startAutoSaveTimer();
+  document.getElementById('autosaveStatus').textContent = 'Autosave: running (auto-download)';
+}
+
+// ---------- 分组增量 CSV（用于 autosave） ----------
+function buildIncrementalCSV_GROUP(for_streams, groupKey){
+  const NL = newline;
+
+  // 记下 SYNC 起始位置（这次只写新包）
+  const syncDeltaStart = {};
+  for (const dev in syncStore){
+    syncDeltaStart[dev] = {};
+    for (const stream in syncStore[dev]){
+      const last = (autoSave.lastSyncIdx?.[dev]?.[stream] ?? 0);
+      syncDeltaStart[dev][stream] = last;
+    }
+  }
+
+  let csv = buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false, syncDeltaStart);
+
+  // header per device
+  const infoLines = [];
+  const headerChunks = [];
+  const firstStreamByDevLocal = {};
+  const startIdxByDev = {};
+  const endIdxByDev = {};
+  for (const dev in dataobject) {
+    const t0 = getFirstTime(dev);
+    const utcMs = (t0 + EPOCH_2000_TO_1970).toFixed(3);
+    infoLines.push(`${dev}: start time(ms-since-2000)=${t0},UTC time(ms-since-1970),${utcMs},SystemStart_UTC_ms,${systemStartUTC[dev]}`);
+
+    const first = chooseFirstStream(dev, for_streams);
+    if (!first) continue;
+    firstStreamByDevLocal[dev] = first;
+
+    const xFirst = dataobject[dev][first].x || [];
+    const prevIdx = (autoSave.lastRowIdxByDevByKey[groupKey]?.[dev] ?? 0);
+    startIdxByDev[dev] = Math.max(0, Math.min(prevIdx, xFirst.length));
+    endIdxByDev[dev]   = xFirst.length;
+
+    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms', ...for_streams];
+    headerChunks.push(pieces.join(','));
+  }
+  csv += infoLines.join(NL) + NL + headerChunks.join(',') + NL;
+
+  // data rows
+  let globalRow = 0;
+  while (true) {
+    let haveData = false;
+    const rowPieces = [];
+    for (const dev in firstStreamByDevLocal) {
+      const first = firstStreamByDevLocal[dev];
+      const xFirst = dataobject[dev][first].x || [];
+      const start = startIdxByDev[dev] || 0;
+      const end   = endIdxByDev[dev] || 0;
+      const idx   = start + globalRow;
+
+      const devPieces = [];
+      if (idx < end) {
+        const dev_ms = xFirst[idx];
+        const sensor_us64 = Math.round(dev_ms * 1000);
+        const unix_ms     = (dev_ms + EPOCH_2000_TO_1970).toFixed(3);
+        devPieces.push(sensor_us64, unix_ms, hostMs(dev, dev_ms));
+        for (const s of for_streams) {
+          const yArr = dataobject[dev][s]?.y;
+          if (yArr && idx < yArr.length) { devPieces.push(yArr[idx]); haveData = true; }
+          else { devPieces.push(''); }
+        }
+      }else{
+        devPieces.push('', '', '');
+        for (const s of for_streams) devPieces.push('');
+      }
+      rowPieces.push(devPieces.join(','));
+    }
+    if (!haveData) break;
+    csv += rowPieces.join(',') + NL;
+    globalRow++;
+  }
+  csv += NL + NL;
+
+  // 更新游标（按组）
+  if (!autoSave.lastRowIdxByDevByKey[groupKey]) autoSave.lastRowIdxByDevByKey[groupKey] = {};
+  for (const dev in firstStreamByDevLocal){
+    autoSave.lastRowIdxByDevByKey[groupKey][dev] = endIdxByDev[dev];
+  }
+  if (!autoSave.lastSyncIdx) autoSave.lastSyncIdx = {};
+  for (const dev in syncStore){
+    if (!autoSave.lastSyncIdx[dev]) autoSave.lastSyncIdx[dev] = {};
+    for (const stream in syncStore[dev]){
+      autoSave.lastSyncIdx[dev][stream] = syncStore[dev][stream].pairsAll.length;
+    }
+  }
+  return csv;
+}
+
+// ---------- Autosave tick：分别写 PPG 和 ACC ----------
+async function onAutoSaveTick(force=false){
+  try{
+    if (!recordingActive && !force) return;
+
+    // \u2605 \u6539\u4E3A\u904D\u5386 EXPORT_GROUPS\uFF1APPG / ACC / ECG \u8D70\u540C\u4E00\u6761\u8DEF\u5F84
+    for (const g of EXPORT_GROUPS){
+      const streams = streamsPresent(g.cols);
+      if (!streams.length) continue;
+      if (!autoSave.lastRowIdxByDevByKey[g.key]) autoSave.lastRowIdxByDevByKey[g.key] = {};
+
+      // \u2605 \u53BB\u6389\u539F\u6765\u7684 "|| force"\uFF1A\u505C\u6B62\u843D\u76D8\u65F6\u4E0D\u518D\u5199\u51FA\u53EA\u6709\u8868\u5934\u3001\u6CA1\u6709\u6570\u636E\u884C\u7684\u7A7A\u6587\u4EF6
+      if (!hasNewRows(streams, autoSave.lastRowIdxByDevByKey[g.key])) continue;
+
+      const csv = buildIncrementalCSV_GROUP(streams, g.key);
+      const ts = timestampForFilename();
+      const fname = `Polar_auto_${ts}_${g.key}.csv`;
+      if (autoSave.dirHandle){
+        const BOM = '\uFEFF';
+        const h = await autoSave.dirHandle.getFileHandle(fname, { create: true });
+        const w = await h.createWritable(); await w.write(BOM + csv); await w.close();
+      }else{
+        saveCsv(`AUTO_${ts}_${g.key}`, csv);
+      }
+    }
+  }catch(e){
+    console.error('Auto-save failed:', e);
+  }
+}
+
+async function flushAutosaveNow({ alsoSaveFull=false }={}){
+  try{
+    await onAutoSaveTick(true); // force one last incremental chunk if any
+    if (alsoSaveFull){
+      await saveFullCsvToFolder();
+    }
+  }catch(e){ console.error('Flush failed:', e); }
+}
+
+// ---------- FINAL FULL：各保存一份 ----------
+function buildDataMatrixOnlyCsv(for_streams){
+  const NL = newline;
+
+  // Header: one device-chunk after another (side-by-side)
+  // ★ 2026-09-06：原来 FULL 文件只写裸表头，同类型多设备（比如两台 Verity Sense）
+  //   并排的两组列名完全一样，分不出哪组是哪台。增量文件本来就有 infoLines，
+  //   这里补上，并在每个列名后加 @设备名，两条路都能定位。
+  const headerChunks = [], infoLines = [];
+  let blockIdx = 0;
+  for (const dev in dataobject) {
+    const t0 = getFirstTime(dev);
+    infoLines.push(`COLUMN BLOCK ${++blockIdx}: ${dev}`
+      + `,start(ms-since-2000)=${t0},UTC(ms-since-1970)=${(t0+EPOCH_2000_TO_1970).toFixed(3)}`
+      + `,SystemStart_UTC_ms=${systemStartUTC[dev]}`);
+    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms', ...for_streams].map(c=>c+'@'+dev);
+    headerChunks.push(pieces.join(','));
+  }
+
+  // Reuse row builder but limit to 'for_streams'
+  const csvRows = getCSVdata(for_streams);
+  return buildMarkerCsvSection() + buildDropCsvSection()
+       + infoLines.join(NL) + NL + NL
+       + headerChunks.join(',') + NL + csvRows;
+}
+
+async function saveFullCsvToFolder(){
+  const tsStart = autoSave.sessionStart ? timestampForFilename(autoSave.sessionStart) : 'session';
+  const tsEnd = timestampForFilename();
+  const BOM = '\uFEFF';
+
+  // \u2605 \u540C\u6837\u6539\u4E3A\u904D\u5386 EXPORT_GROUPS\uFF0CECG \u7684 FULL \u6587\u4EF6\u4E0D\u4F1A\u518D\u6F0F
+  for (const g of EXPORT_GROUPS){
+    const streams = streamsPresent(g.cols);
+    if (!streams.length) continue;
+    const csv = buildDataMatrixOnlyCsv(streams);
+    const fname = `Polar_full_${tsStart}__to__${tsEnd}_${g.key}.csv`;
+    if (autoSave.dirHandle){
+      const h = await autoSave.dirHandle.getFileHandle(fname, { create: true });
+      const w = await h.createWritable(); await w.write(BOM + csv); await w.close();
+    }else{
+      saveCsv(`FULL_${tsEnd}_${g.key}`, csv);
+    }
+  }
+}
+
+/* ---------- The rest (graphing, device, CSV) ---------- */
+function addDevice(){
+  document.getElementById("Sense").disabled=true;
+  num=Object.keys(obj)+1;
+  navigator.bluetooth.requestDevice({
+      filters: [{namePrefix: "Polar"}],
+      acceptAllDevices: false,
+      manufacturerData: [{companyIdentifier: 0x00D1}],
+      optionalServices: [PMD_SERVICE]
+  }).then(async newdevice=>{
+    if(newdevice!==undefined){
+      name=newdevice.name;
+      devicetype=name.split(" ")[1];
+      obj[num]=structuredClone(devices[devicetype]);
+      obj[num]['device']=newdevice;
+      var mydiv = document.getElementById(name);
+      if (mydiv === null){
+        await obj[num].device.addEventListener('gattserverdisconnected', onDisconnected);
+        obj[num].server = await obj[num].device.gatt.connect()
+        obj[num].service = await obj[num].server.getPrimaryService(PMD_SERVICE);
+        obj[num].character = await obj[num].service.getCharacteristic(PMD_CONTROL);
+        controlfunction=await obj[num].character.addEventListener('characteristicvaluechanged',printcontrolvalue);
+        await obj[num].character.startNotifications();
+        obj[num].data = await obj[num].service.getCharacteristic(PMD_DATA);
+        await obj[num].data.startNotifications();
+        outputfunction=await obj[num].data.addEventListener('characteristicvaluechanged',printHeartRate);
+        serviceButtons(name,devicetype);
+        Object.defineProperty(obj, name,Object.getOwnPropertyDescriptor(obj, num));
+        delete obj[num];
+        layoutCombined[name]=JSON.parse(JSON.stringify(layoutCombinedg));
+        if(devicetype=="Sense"){layoutCombined[name].yaxis.range=[-yscale_PPG_default,yscale_PPG_default/3];}
+        else{layoutCombined[name].yaxis.range=[-yscale_ECG_default,yscale_ECG_default];}
+      }
+    }
+  }).catch(()=>{}).finally(()=>{ document.getElementById("Sense").disabled=false; });
+}
+function sleep(ms){return new Promise(resolve => setTimeout(resolve, ms));}
+function ButtonColour(buttonID,colour,state){id=document.getElementById(buttonID);id.style.backgroundColor=colour;id.disabled=!state}
+async function ActivateStream(name,stream){
+  // ★ 2026-09-03 皮肤电接入：非 Polar 设备走各自的适配器，PMD 控制通道那套对它们不适用
+  const _kind = obj[name] && obj[name].kind;
+  if(_kind==='eda') return EDA.startStream(name,stream);
+  if(_kind==='gsr') return GSR.startStream(name,stream);
+  let tickbox=document.getElementById(name+stream.name);
+  if(obj[name].character!==undefined){
+    var Init = [0x02,stream.id];
+    BytesToSend=Init.concat(stream.code_start);
+    await obj[name].character.writeValue(new Uint8Array(BytesToSend));
+    tickbox.checked=true;
+    setStreamFlag(name, stream.name, true);   // track recording state
+  }else{tickbox.checked=false;}
+}
+async function AllStreamsOn(name){for(s in obj[name].output){await ActivateStream(name,streams[obj[name].output[s]]);await sleep(100);}}
+async function AllAllStreamsOn(){if(obj.length>0){for(name in obj){await AllStreamsOn(name);}}}
+async function AllAllStreamsOff(){
+  if(obj.length>0){for(name in obj){await AllStreamsOff(name);}}
+  // flush will be triggered automatically when recordingActive becomes false
+}
+async function AllStreamsOff(name){list=[...obj[name].output].reverse();for(s in list){await streamOff(name,streams[list[s]]);}}
+async function connectStream(name,device,b){state=document.getElementById(name+b).checked;stream=streams[b];if(state==true){await ActivateStream(name,stream)}else{streamOff(name,stream);}}
+async function StartStreams(){time=[];for(const [name,device] of Object.entries(devices)){for(const stream of Object.entries(device.output)){await ActivateStream(device,streams[stream[1]])}}ButtonColour("Start streams","Green",false);ButtonColour("Stop streams","",true);}
+async function streamOff(name,stream){
+  const _kind = obj[name] && obj[name].kind;
+  if(_kind==='eda') return EDA.stopStream(name,stream);
+  if(_kind==='gsr') return GSR.stopStream(name,stream);
+  off=new Uint8Array([0x03,stream.id]);await obj[name].character.writeValue(off);document.getElementById(name+stream.name).checked=false;setStreamFlag(name, stream.name, false);}
+async function disconnect(){for(const [name,device] of Object.entries(devices)){if("server" in device){for(const stream of Object.entries(device.output).reverse()){await streamOff(name,streams[stream[1]]);}}}}
+function pushDataTrace(device,name,x,y){
+  if(!(name in traces[device])){addTrace(device,name);}
+  dataobject[device][name].x.push(x);
+  traces[device][name].x.push(x);
+  dataobject[device][name].y.push(y);
+  traces[device][name].y.push(y);
+}
+function pushData(device, ids, timearray, y_values){
+  if(!(device in dataobject)){dataobject[device]={};}
+  if(!(device in traces)){traces[device]={};}
+  ids.forEach(function(value){
+    if(!(value in dataobject[device])){dataobject[device][value]={x:[],y:[]}};
+    dataobject[device][value].x.push(...timearray);
+    dataobject[device][value].y.push(...y_values[ids.indexOf(value)]);
+    if(!(value in traces[device])){addTrace(device,value);}
+    traces[device][value].x.push(...timearray);
+    traces[device][value].y.push(...y_values[ids.indexOf(value)]);
+  });
+}
+function DataArrayLength(devicename,name){
+  if(dataobject[devicename][name]==undefined){
+    dataobject[devicename][name]={x:[],y:[]};
+    return(0);
+  }else{return(dataobject[devicename][name].x.length);}
+}
+function completeDeltaFrame(data,num_chan,bytes){headerpointer=10+num_chan*bytes;framepointer=headerpointer+2;data_array=getInitialSensorValues(data.slice(10,headerpointer),bytes);while(framepointer<data.byteLength){DeltaFrameDetails=DeltaFrameDescription(data.slice(headerpointer,framepointer),num_chan);nextheaderpointer=framepointer+DeltaFrameDetails.bytes;Frame=reSlice(ChunkArray(data.slice(framepointer,nextheaderpointer)),DeltaFrameDetails.bits,DeltaFrameDetails.channels);data_array=addDeltaframe(Frame, data_array);headerpointer=nextheaderpointer;framepointer=headerpointer+2;}return data_array;}
+function defineLine(color,name,linetype){return {type:'scattergl',mode:linetype,showlegend:true,line:{color:'rgb('+color+')', width:1}, name:name,x:[],y:[]}}
+function serviceButtons(name,devicetype){
+  // ★ 2026-09-03 UI 重做：原来这里用 insertAdjacentHTML 往 #streams / #graphsdiv
+  //   后面塞两坨 <table>，多设备时顺序还是反的。改为交给 UI 层渲染成设备卡片。
+  //   引擎侧契约不变：卡片里仍然提供 id=<设备名>（连重复设备的判重靠它）、
+  //   id=<设备名><流名> 的复选框、id=graph<设备名> 的绘图位、bpm/size 读数位。
+  UI.buildDeviceCard(name, devicetype);
+}
+timeconstant=0.2; duration=5000;
+starttime={}; last_filter={}; last_incom={}; intime={};
+var signedconvert=[]; signedconvert[0]=0; signedconvert[255]=2**16;
+function alterGain(name,fraction){layoutCombined[name].yaxis.range=[layoutCombined[name].yaxis.range[0]*fraction,layoutCombined[name].yaxis.range[1]*fraction];}
+ecg_timestep=1000/130; H10_rate=0xC8; acc_timestep=1000/H10_rate;
+
+// ★ 2026-09-02 包边界时间戳修正
+// 原实现把采样间隔写死成标称值（H10 ACC 5.000ms / ECG 7.692ms），但设备实际 ODR 未必等于标称值。
+// 2026-09-02 实测 H10 加速度计：每包 36 样本，设备时间戳每包只前进 177.65ms（而非 36×5=180ms），
+// 真实间隔 4.935ms ≈ 202.6Hz。写死 5ms 会让每个包接缝处的时间轴倒退约 2.35ms，
+// 累计让整条时间轴走快 1.3%。同一次测试里 ECG 基本吻合标称（73 样本 / 561.96ms = 129.9Hz）。
+// 修法：用相邻两包设备时间戳之差除以样本数得到真实间隔；首包或断流后回退标称值。
+var lastPacketDevTime = {};
+
+function fillTimeArray(Type,devicename,t,dTime,num,step){
+  const packet_end = Number(new BigInt64Array(t)[0])/1000000;   // 本包最后一个样本的设备时刻
+  if(!lastPacketDevTime[devicename]) lastPacketDevTime[devicename]={};
+  const prev = lastPacketDevTime[devicename][Type];
+
+  let realStep = step;
+  if(prev!==undefined && num>0){
+    const measured = (packet_end - prev) / num;
+    // 只在包连续时采信实测值；断流或重连后间隔会异常，回退标称值避免把样本拉伸到断口上
+    if(measured > step*0.5 && measured < step*1.5) realStep = measured;
+  }
+  lastPacketDevTime[devicename][Type] = packet_end;
+
+  start_packet_time=packet_end-num*realStep;
+  computer_time=dTime-num*realStep;
+  if(starttime[devicename]===undefined){
+    var x = new Date("1/1/2000 00:00:00");var y = new Date("1/1/1970 00:00:00");
+    let seconds = Math.abs(x.getTime() - y.getTime())+start_packet_time;
+    startdate=new Date(seconds);
+    if(firstTime==0){firstTime=computer_time}
+    deviceEPOCH=computer_time-start_packet_time;
+    starttime[devicename]=start_packet_time;
+    systemStartUTC[devicename] = computer_time;
+  }
+  stream_time=start_packet_time;
+  a=createArray(num);
+  for(i=0;i<num;i++){a[i]=Math.round((stream_time+realStep*i)*1000)/1000;}
+  return a;
+}
+
+function createArray(length){var arr=new Array(length||0),i=length;if(arguments.length>1){var args=Array.prototype.slice.call(arguments,1);while(i--) arr[length-1-i]=createArray.apply(this,args);}return arr;}
+function WordstoSignedInteger(words,BitsPerWord){val=0;word_val=2**BitsPerWord;for(i=0;i<words.length;i+=1){val+=words[i]*word_val**i;}bits=words.length*BitsPerWord;if(val>2**(bits-1)){val=val-2**bits;}return val;}
+function getInitialSensorValues(a,bytes){a=new Uint8Array(a);sensors=createArray((a.length/bytes),1);offset=0;while(offset<a.length){sensors[offset/bytes][0]=WordstoSignedInteger(a.slice(offset,offset+bytes),8);offset+=bytes;};return(sensors);}
+function addDeltaframe(frame, data_array){chans=frame[0].length;for(offset=0;offset<frame.length;offset+=1){for(ch=0;ch<chans;ch+=1){data_array[ch].push((+data_array[ch].slice(-1)+frame[offset][ch]));}}return (data_array);}
+function DeltaFrameDescription(b,channels){a=new Uint8Array(b);bits=a[0];number=a[1];return({bits:bits, number:number, bytes:Math.ceil(number*bits/8*channels), channels:channels});}
+function ChunkByte(sbyte){n=[];ts=[1,4,16,64];tg=[3,12,48,192];for(a=0;a<4;a+=1){n[a]=(sbyte & tg[a])/ts[a]};return(n)}
+function ChunkArray(arr){arr=new Uint8Array(arr);offset=0;NewArray=[];while(offset<arr.length){NewArray.push(...ChunkByte(arr[offset]));offset+=1;}return(NewArray);}
+function HPfilter(array,last_in,last_out){f_arr=createArray(array.length);fraction=(1+1/(samplerate*timeconstant));array.forEach(function(value, n){last_out=f_arr[n]=Math.round((value+last_out-last_in)/fraction);last_in=value;});return(f_arr);}
+function reSlice(arr,bits,channels){offset=0;block=bits/2*channels;len=Math.floor(arr.length/block);f_array=createArray(len,channels);while(offset<len*block){for(a=0;a<channels;a+=1){mini_array=arr.slice(offset+a*bits/2,offset+(a+1)*bits/2);f_array[offset/block][a]=WordstoSignedInteger(mini_array,2);};offset+=block;}return(f_array);}
+function onDisconnected(event){
+  // ★ 2026-09-03 UI 重做：原实现只删 id=<设备名> 那个 span 和 graph 节点，
+  //   放到卡片式布局里会留下半张空卡；另外原来断开后 obj 里仍留着这台设备，
+  //   设备计数和 Start ALL 的遍历都会算上一台已经掉线的表。
+  //   这里改为整卡移除 + 从 obj 摘除；dataobject 保留，掉线前的数据仍可导出。
+  var name = event.target.name;
+  UI.removeDeviceCard(name);
+  delete obj[name];
+  delete streamFlags[name];
+  delete lastPacketDevTime[name];
+  recomputeRecordingActive();
+  UI.updateStatus();
+}
+function GrabTiming(){document.getElementById("confirmed").value=Math.round(dataobject['timing_smooth'].y[dataobject['timing_smooth'].y.length-1]*10)/10;document.getElementById("confirmed_BPM").value=document.getElementById("bpm").innerHTML;}
+function die(str) {throw new Error(str || "Script ended by death");}
+function report(obj){console.log("Obj - ",obj)}
+function printcontrolvalue(event){devicename=event.currentTarget.service.device.name;response=new Uint8Array(event.currentTarget.value.buffer);console.log(devicename, "(timeStamp=",Math.round(event.timeStamp)/1000,") ",Control_Types[response[1]], Stream_Types[response[2]], Device_Errors[response[3]]);}
+firstTime=0;graph_time=[]; dataoutput='';
+
+function saveCsv(tag, csvString) {
+  const fname =
+    'Polar data ' +
+    (typeof firstTime !== 'undefined' && firstTime
+      ? new Date(firstTime).toISOString()
+      : new Date().toISOString()) +
+    '_' + tag + '.csv';
+
+  const BOM = '\uFEFF';
+  const blob = new Blob([BOM, csvString], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fname;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}
+
+// 手动下载：各下一份
+function downloadData() {
+  try {
+    // ★ 同样改为遍历 EXPORT_GROUPS
+    const present = EXPORT_GROUPS
+      .map(g => ({ key:g.key, streams:streamsPresent(g.cols) }))
+      .filter(g => g.streams.length);
+
+    if (!present.length) {
+      alert('No data to export.');
+      return;
+    }
+    for (const g of present){
+      saveCsv(`RAW_${g.key}`, DataObjectToCSV(g.streams));
+    }
+  } catch (e) {
+    console.error('download failed:', e);
+    alert('Export failed: ' + e.message);
+  }
+}
+
+function emptybuffer(){dataobject={};traces={};}
+function copyTable(){ttext=document.getElementById("ttable").innerHTML;navigator.clipboard.writeText(ttext);}
+function FindLastPeak(data,threshold){for(i=data.x.length;i>0;i--){if (data.y[i]>threshold){peak=Math.max(...data.y.slice(i-20,i));peakindex=data.y.slice(i-20,i).indexOf(peak);break;}}return data.x[i-20+peakindex];}
+function ReduceOld(devicename,data,sourcename,targetname,resolution){
+  if(data[devicename][targetname]==undefined){data[devicename][targetname]={x:[],y:[]};addTrace(devicename,targetname);start_index=0;}else{
+    start_index=data[devicename][sourcename].x.indexOf(data[devicename][targetname].x[data[devicename][targetname].x.length-1]);
+    array={x:data[devicename][sourcename].x.slice(start_index,data[devicename][sourcename].x.length),y:data[devicename][sourcename].y.slice(start_index,data[devicename][sourcename].y.length)}
+    t=RDP(array,resolution)
+    data[devicename][targetname].x.push(...t.x);data[devicename][targetname].y.push(...t.y);
+    traces[devicename][targetname].x.push(...t.x);traces[devicename][targetname].y.push(...t.y);
+  }
+}
+function Reduce(devicename,data,sourcename,targetname,resolution){
+  if(data[devicename][targetname]==undefined){
+    data[devicename][targetname]={x:[],y:[]};
+    source=data[devicename][sourcename];
+    target=data[devicename][targetname];
+    start_index=0;
+  }else{
+    start_index=source.x.indexOf(target.x[target.x.length-1]);
+    array={x:source.x.slice(start_index,source.x.length),y:source.y.slice(start_index,source.y.length)};
+    t=RDP(array,resolution);
+    data[devicename][targetname].x.push(...t.x);
+    data[devicename][targetname].y.push(...t.y);
+    if(!(targetname in traces[devicename])){addTrace(devicename,targetname);}
+    traces[devicename][targetname].x.push(...t.x);
+    traces[devicename][targetname].y.push(...t.y);
+  }
+}
+function RDP(data, resolution){
+  var dmax=0;var maxv=0;
+  var end_index=data.x.length-1;
+  var m=(data.y[0]-data.y[end_index])/(data.x[0]-data.x[end_index]);
+  var c=data.y[0]-m*data.x[0];
+  for(var j=1;j<end_index;j++){
+    var error=Math.abs(data.y[j]-m*data.x[j]-c);
+    if(error>dmax){dmax=error;maxv=j;}
+  }
+  var r1={x:[],y:[]};
+  if(dmax>resolution){
+    end_index++;
+    cut=maxv+1;
+    r1 = RDP({x:data.x.slice(0,cut), y:data.y.slice(0,cut)},resolution);
+    var r2 = RDP({x:data.x.slice(maxv,end_index),y:data.y.slice(maxv,end_index)}, resolution);
+    r1.x.push(...r2.x);
+    r1.y.push(...r2.y);
+  }else{
+    r1.x[0]=data.x[0];
+    r1.y[0]=data.y[0];
+  }
+  return r1;
+}
+function detectQRS(data,devicename){
+  min_samples_betweenQRS=10;
+  numQRS=DataArrayLength(devicename,'QRS');
+  if(numQRS>0){i=data.ECG.x.indexOf(data.QRS.x[numQRS-1])+min_samples_betweenQRS;}else{i=0;}
+  triggerrate=-(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/60;
+  while(i<data.ECG.x.length){
+    next=i+1;
+    rate=(data.ECG.y[next]-data.ECG.y[i])/(data.ECG.x[next]-data.ECG.x[i])
+    if(rate<triggerrate){
+      ECGmax = Math.max(...data.ECG.y.slice(i-10,next));
+      peakindex = data.ECG.y.slice(i-10,next).indexOf(ECGmax);
+      pushDataTrace(devicename,'QRS', data.ECG.x[i-10+peakindex],ECGmax);
+      i+=min_samples_betweenQRS;
+    }else{i+=1;}
+  }
+  if(dataobject[devicename]['QRS'].x.length>5){
+    document.getElementById("bpm"+devicename).innerHTML=Math.round(5*60000/(dataobject[devicename]['QRS'].x[dataobject[devicename]['QRS'].x.length-1]-dataobject[devicename]['QRS'].x[dataobject[devicename]['QRS'].x.length-6]));
+    document.getElementById("size"+devicename).innerHTML=Math.round(dataobject[devicename]['QRS'].y[dataobject[devicename]['QRS'].x.length-1]/10)/100;}
+}
+function detectPPGpeak(devicename,data){
+  maximum_heart_rate=170;
+  min_samples_betweenPPGpeaks=Math.round((60/maximum_heart_rate)*samplerate);
+  triggerrate=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/20;
+  numPPGpeak=DataArrayLength(devicename,'PPGpeak');
+  DataArrayLength(devicename,'PPGstart');DataArrayLength(devicename,'PPGend');
+  if(numPPGpeak>0){i=data[devicename].PPGsum_f.x.indexOf(data[devicename].PPGpeak.x[numPPGpeak-1])+min_samples_betweenPPGpeaks;}else{i=0;}
+  while(i<data[devicename].PPGsum_f.x.length-40){
+    if(data[devicename].PPGrate.y[i]<-triggerrate){
+      PPGratemin = Math.min(...data[devicename].PPGrate.y.slice(i,i+20));
+      peakindex = data[devicename].PPGrate.y.slice(i,i+20).indexOf(PPGratemin);
+      pushDataTrace(devicename,'PPGpeak',data[devicename].PPGrate.x[peakindex+i],PPGratemin);
+      startindex = getPPGStart(data[devicename].PPGrate.y.slice(i-20,i),PPGratemin);
+      endindex=getPPGend(data[devicename].PPGrate.y.slice(i+peakindex,i+30+peakindex), PPGratemin);
+      pushDataTrace(devicename,'PPGstart',data[devicename].PPGrate.x[startindex-20+i],data[devicename].PPGrate.y[startindex-20+i]);
+      pushDataTrace(devicename,'PPGend',data[devicename].PPGrate.x[endindex+i+peakindex],data[devicename].PPGrate.y[endindex+i+peakindex]);
+      i+=min_samples_betweenPPGpeaks;
+    }else{i+=1;}
+  }
+  document.getElementById("bpm"+devicename).innerHTML=Math.round(5*60000/(dataobject[devicename]['PPGpeak'].x[dataobject[devicename]['PPGpeak'].x.length-1]-dataobject[devicename]['PPGpeak'].x[dataobject[devicename]['PPGpeak'].x.length-6]));
+  document.getElementById("size"+devicename).innerHTML=Math.round(dataobject[devicename]['PPGpeak'].y[dataobject[devicename]['PPGpeak'].y.length-1]/100)/10;
+}
+function getPPGStart(data,minrate){var i=data.length-1;var threshold=minrate/5;while(data[i]<threshold){i-=1;}return(i);}
+function getPPGend(data,minrate){var i=0;var threshold=minrate/5;while(data[i]<threshold){i+=1;}return(i);}
+function getTimings(data){
+  var update=false;
+  if(data.PPGpeak!==undefined && data.QRS!==undefined){
+    start_index=DataArrayLength('timing'); DataArrayLength('timingstart');DataArrayLength('timing_smooth');DataArrayLength('timingend');
+    for(i=start_index;i<(data.QRS.x.length-1);i++){
+      QRSpeaktime=data.QRS.x[i];
+      lastPPG=data.PPGpeak.x.length;
+      while(data.PPGpeak.x[--lastPPG]>QRSpeaktime);
+      var PPGtime=data.PPGpeak.x[lastPPG+1];
+      if(PPGtime!==undefined){
+        update=true;
+        delay=PPGtime-QRSpeaktime;
+        delaystart=data.PPGstart.x[lastPPG+1]-QRSpeaktime;
+        delayend=data.PPGend.x[lastPPG+1]-QRSpeaktime;
+        pushDataTrace('timing',QRSpeaktime,delay);
+        pushDataTrace('timingstart', QRSpeaktime,delaystart);
+        pushDataTrace('timingend', QRSpeaktime,delayend);
+        if(i==0){smoothdelay=delay}else{smoothdelay=data.timing_smooth.y[i-1]+(delay-data.timing_smooth.y[i-1])*0.05;}
+        if(Math.abs((smoothdelay-delay)/delay)>0.15 || smoothdelay==undefined){smoothdelay=delay;}
+        document.getElementById("timing_smooth").innerHTML=Math.round(smoothdelay*10)/10;
+        pushDataTrace('timing_smooth',QRSpeaktime,smoothdelay);
+      }
+    }
+  }
+  return(update);
+}
+function AddNotes(){
+  startindex=DataArrayLength('Systolic');DataArrayLength('Diastolic');DataArrayLength('Notes');
+  eventtime=dataobject['timing'].x[dataobject['timing'].x.length-1];
+  var systolic=document.getElementById("systolic").value;
+  var diastolic=document.getElementById("diastolic").value;
+  var notes=document.getElementById("notes").value;
+  var bpm=document.getElementById("confirmed_BPM").value;
+  var entrytime=new Date();
+  var ISOtime=entrytime.toISOString();
+  entrytime=entrytime/1000/24/60/60+25569;
+  var timingsmooth=document.getElementById("confirmed").value;
+  dataobject['Systolic'].x[startindex]=eventtime;dataobject['Diastolic'].x[startindex]=eventtime;dataobject['Notes'].x[startindex]=eventtime;
+  dataobject['Systolic'].y[startindex]=systolic;dataobject['Diastolic'].y[startindex]=diastolic;dataobject['Notes'].y[startindex]=notes;
+  document.getElementById("confirmed").value=timingsmooth+"ms at "+eventtime+"ms";
+  document.getElementById("list_timing").innerHTML=document.getElementById("list_timing").innerHTML+"<tr><td>"+ISOtime+"</td><td>"+entrytime+"</td><td>"+systolic+"</td><td>"+diastolic+"</td><td>"+timingsmooth+"</td><td>"+bpm+"</td><td>"+notes+"</td></tr>";
+}
+function ratePPG(devicename,data){
+  start_index=DataArrayLength(devicename,'PPGrate');DataArrayLength(devicename,'PPGacceleration');
+  time=1000/samplerate;
+  for(i=start_index;i<(data[devicename].PPGsum_f.x.length);i++){
+    rate=Math.round((data[devicename].PPGsum_f.y[i]-data[devicename].PPGsum_f.y[i-1])/time*100);
+    pushDataTrace(devicename,'PPGrate',data[devicename].PPGsum_f.x[i],rate);
+    acceleration=Math.round((data[devicename].PPGrate.y[i]-data[devicename].PPGrate.y[i-3])/time*100/4);
+    pushDataTrace(devicename,'PPGacceleration',data[devicename].PPGsum_f.x[i-1],acceleration);
+  }
+}
+function smoothPPG(devicename,data,filter){
+  var sumfilter=0;for(var i=filter.length; i--;) {sumfilter+=filter[i];}
+  filter_offset=(filter.length-1)/2;
+  start_index=DataArrayLength(devicename,'PPGsum_f');
+  if(start_index==0){
+    for(i=0;i<filter_offset;i++){
+      data[devicename].PPGsum_f.x[i]=data[devicename].PPGsum.x[i];
+      data[devicename].PPGsum_f.y[i]=data[devicename].PPGsum.y[i];
+    }
+    start_index=filter_offset;
+  }
+  for(i=start_index;i<(data[devicename].PPGsum.x.length-filter_offset);i++){
+    smooth=0;first_unfiltered=i-filter_offset;
+    filter.forEach(function(value,n){smooth+=value*data[devicename].PPGsum.y[first_unfiltered+n];})
+    smooth=Math.round(smooth/sumfilter);
+    pushDataTrace(devicename,'PPGsum_f',data[devicename].PPGsum.x[i],smooth);
+  }
+}
+function getCSVmarkers(list){
+  mark=document.getElementById("list_timing");
+  markers="";
+  for (var i = 0, row; row = mark.rows[i]; i++) {for (var j = 0, col; col = row.cells[j]; j++) {markers+=col.innerHTML+",";}markers+="\r\n";}
+  markers="Markers"+newline+markers+newline;
+  return markers;
+}
+function getFirstTime(dev) {
+  let min = null;
+  if (dataobject[dev]) {
+    for (const k of Object.keys(dataobject[dev])) {
+      const x = dataobject[dev][k]?.x;
+      if (Array.isArray(x) && x.length) {
+        const v = x[0];
+        if (min === null || v < min) min = v;
+      }
+    }
+  }
+  if (min == null && starttime && starttime[dev] != null) min = starttime[dev];
+  if (min == null) min = 0;
+  return Math.round(min);
+}
+function getCSVheadings(for_streams){
+  const infoLines = [];
+  const headerChunks = [];
+  for (const dev in dataobject) {
+    const t0    = getFirstTime(dev);
+    const utcMs = (t0 + EPOCH_2000_TO_1970).toFixed(3);
+    infoLines.push(`${dev}: start time(ms-since-2000)=${t0},UTC time(ms-since-1970),${utcMs},SystemStart_UTC_ms,${systemStartUTC[dev]}`);
+    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms'];
+    for (const s of for_streams) pieces.push(s);
+    headerChunks.push(pieces.join(','));
+  }
+  // Manual export includes full SYNC per-packet:
+  return buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false) + infoLines.join(newline) + newline + headerChunks.join(',') + newline;
+}
+function getCSVdata(for_streams){
+  const NL = newline;
+  const lines = [];
+  let rowIdx = 0;
+  while (true) {
+    let haveData = false;
+    const rowPieces = [];
+    for (const dev in dataobject) {
+      const firstStream = Object.keys(dataobject[dev]).find(s => for_streams.includes(s));
+      if (!firstStream) continue;
+
+      const xFirst = dataobject[dev][firstStream].x;
+      const sensor_us64 = (rowIdx < xFirst.length) ? Math.round(xFirst[rowIdx] * 1000) : '';
+      const unix_ms     = (rowIdx < xFirst.length) ? (xFirst[rowIdx] + EPOCH_2000_TO_1970).toFixed(3) : '';
+      const host_ms     = (rowIdx < xFirst.length) ? hostMs(dev, xFirst[rowIdx]) : '';
+
+      const devPieces = [sensor_us64, unix_ms, host_ms];
+
+      for (const streamName of for_streams) {
+        const yArr = dataobject[dev][streamName]?.y;
+        if (yArr && rowIdx < yArr.length) {
+          devPieces.push(yArr[rowIdx]);
+          haveData = true;
+        } else {
+          devPieces.push('');
+        }
+      }
+      rowPieces.push(devPieces.join(','));
+    }
+    if (!haveData) break;
+    lines.push(rowPieces.join(','));
+    rowIdx++;
+  }
+  return lines.join(NL) + NL + NL;
+}
+function DataObjectToCSV(outputstreams){
+  csv=getCSVmarkers("list_timing");
+  csv+=getCSVheadings(outputstreams);
+  csv+=getCSVdata(outputstreams);
+  return csv;
+}
+
+/* -------- BLE handler -------- */
+function printHeartRate(event){
+  var dataTime=Date.now(); // host arrival time for this packet
+  var devicename=event.currentTarget.service.device.name;
+  var data=event.target.value.buffer;
+  var devicetime=Number(new BigInt64Array(data.slice(1,9))[0])/1000000;
+  var DataType = Number(new Uint8Array(data.slice(0,1)));
+
+  const streamName = (DataType==1 ? 'PPG' : (DataType==0 ? 'ECG' : 'ACC'));
+  pushSyncPair(devicename, streamName, devicetime, dataTime);
+
+  updatecombined[devicename]=true;
+  if(!(devicename in intime)){intime[devicename]=devicetime;}
+  if(graph_time[devicename]>(intime[devicename]+duration)){
+    intime[devicename]=graph_time[devicename];
+    xscale={range:[intime[devicename]-200,intime[devicename]+duration],showticklabels:false}
+    layoutCombined[devicename].xaxis={...xscale};
+  }
+
+  if (DataType == 2){
+    frame_type=Number(new Uint8Array(data.slice(9,10)));resolution=(frame_type+1)*8;step=resolution/8;
+    if(frame_type==1){
+      samples = new Int16Array(data.slice(10,))
+      npoints=samples.byteLength/2;
+      ACC=createArray(npoints,3);
+      for(offset=0;offset<npoints;offset+=3){i=offset/3;ACC[0][i]=samples[offset];ACC[1][i]=samples[offset+1];ACC[2][i]=samples[offset+2];}
+      ACCtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,ACC[0].length,acc_timestep);
+    }else{
+      ACC=completeDeltaFrame(data,3,2);
+      ACCtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,ACC[0].length,(1000/Sense_rate));
+      ACC.push([]);
+    }
+    for(i=0;i<ACC[0].length;i++){ACC[3][i]=Math.round(Math.sqrt(ACC[0][i]**2+ACC[1][i]**2+ACC[2][i]**2)/16*200);}
+    pushData(devicename,['acc_x','acc_y','acc_z','acc_v'],ACCtime,ACC)
+    resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/(COMBINED_H-100);
+    ReduceOld(devicename,dataobject,'acc_v','acc_v_reduced',resolution);
+  }
+  if (DataType == 0){
+    samples = new Uint8Array(data.slice(10,))
+    npoints=samples.byteLength/3; ECGdata=createArray(npoints);
+    for(offset=0;offset<samples.byteLength;offset+=3){i=offset/3;ECGdata[i]=WordstoSignedInteger(samples.slice(offset,offset+2),8);}
+    ECGtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,npoints,ecg_timestep);
+    pushData(devicename,['ECG'],ECGtime,[ECGdata]);
+    resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/(COMBINED_H-100);
+    Reduce(devicename,dataobject,'ECG','ECG_reduced',resolution);
+    detectQRS(dataobject[devicename],devicename);
+  }
+  if(DataType == 1){
+    PPGsum=[];PPGsumfilter=[];
+    if(!(devicename in last_incom)){last_incom[devicename]=0;last_filter[devicename]=0;}
+    NewPPG=completeDeltaFrame(data,4,3);
+    npoints=NewPPG[0].length;
+    for (i=0;i<npoints;i++){PPGsum[i]=NewPPG[0][i]+NewPPG[1][i]+NewPPG[2][i]}
+    PPGtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,npoints,1000/samplerate);
+
+    pushData(devicename, PPG_CHANNEL_NAMES, PPGtime, NewPPG);
+
+    PPGsumfilter=HPfilter(PPGsum,last_incom[devicename],last_filter[devicename])
+    last_filter[devicename]=PPGsumfilter.slice(-1)[0];
+    last_incom[devicename]=PPGsum.slice(-1)[0]
+    pushData(devicename,['PPGsum'],PPGtime,[PPGsumfilter]);
+
+    smoothPPG(devicename,dataobject,[0.025,0.04,0.07,0.13,0.2,0.22,0.2,0.13,0.07,0.04,0.025])
+    resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/COMBINED_H;
+    ReduceOld(devicename,dataobject,'PPGsum_f','PPG_f_reduced',resolution);
+    ratePPG(devicename,dataobject)
+    ReduceOld(devicename,dataobject,'PPGrate','PPGrate_reduced',resolution);
+    detectPPGpeak(devicename,dataobject);
+  }
+  graph_time[devicename]=devicetime;
+}
+
+/* -------- UI -------- */
+function LoadMarkers(){var element=document.getElementById("selectedfile"); element.value=""; element.click();}
+function SaveMarkers(){
+  var csvdata=new Blob([document.getElementById("Markers").innerHTML]);
+  var a=window.document.createElement("a");
+  a.href=window.URL.createObjectURL(csvdata, {type: "text/plain"});
+  a.download="MarkerList "+new Date().toISOString()+".txt";
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+function ClearMarkers(){document.getElementById("Markers").innerHTML="";}
+function AddMarker(){
+  marker=document.getElementById('markername');
+  markervalue=marker.value;
+  if(markervalue!=""){
+    text="<button title='Insert marker: "+markervalue+"' onClick='InsertMarker(\""+markervalue+"\")'>"+markervalue+"</button>";
+    document.getElementById("Markers").insertAdjacentHTML("beforeend", text);
+  }
+  marker.focus();
+  marker.value="";
+}
+window.dropLog = [];        // ★ 2026-09-06：掉线/重连事件，写进每份 CSV，
+                            //    数据缺口必须可追溯，不能只是曲线上一段空白
+window.markerLog = [];      // ★ 2026-09-04：标记原来只写进页面表格，CSV 里没有，
+                            //    录完刷新页面就全丢了。现在同时进内存并写进每份 CSV。
+function InsertMarker(a){
+  var entrytime=new Date();
+  try{ window.markerLog.push({ unix_ms: entrytime.getTime(), iso: entrytime.toISOString(), name: a }); }catch(e){}
+  relativeTime=(Math.round(entrytime.getTime()-firstTime)/1000);
+  var ISOtime=entrytime.toISOString();
+  entrytime=entrytime/10*10;
+  document.getElementById("list_timing").innerHTML=document.getElementById("list_timing").innerHTML+"<tr><td>"+ISOtime+"</td><td>"+entrytime+"</td><td>"+relativeTime+"</td><td>"+a+"</td></tr>";
+}
+function updateGraphs() {
+  for(const[key,trace] of Object.entries(traces)){
+    graphname='graph'+key;
+    if(updatecombined[key]==true && document.getElementById(graphname)!=null){
+      layoutCombined[key].datarevision=Math.random();
+      linestoplot=['PPGpeak','PPGstart','PPGend','PPGrate_reduced','PPG_f_reduced','acc_v_reduced','ECG_reduced','QRS',
+                   'EDA_G','EDA_SCL','GSR_uS'];
+      lines=[];
+      for(id in trace){if(linestoplot.includes(id)){lines.push(trace[id])}};
+      Plotly.react(graphname,lines,layoutCombined[key]);
+      updatecombined[key]=false;
+    }
+  }
+  renderSyncPanel();
+}
+
+</script>
+
+<script>
+/* =========================================================================
+   皮肤电扩展 · 2026-09-03
+   两路来源：
+     A) 天琴座 Lyra / Nervous EDA —— BLE Nordic UART Service，COBS + protobuf
+     B) Arduino 模拟 GSR 模块   —— Web Serial（CH340），逐行文本
+   接入方式与引擎原有契约一致：obj / devices / streams / dataobject /
+   traces / layoutCombined / pushData / pushSyncPair / EXPORT_GROUPS。
+   ========================================================================= */
+
+/* ---------------- 常量 ---------------- */
+const EDA_NUS  = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const EDA_CHAR_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // 主机→设备 write
+const EDA_CHAR_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // 设备→主机 notify
+const EDA_FREQS = [12,28,32,36,44,68,84,108,136,196,256,324,400,484,576,724];
+const EDA_NAME_PREFIXES = ['SichirayEDA_','Sichiray_','NervousEDA_','Nervous'];
+
+/* 导出列 */
+const EDA_EXPORT_COLUMNS = ['EDA_G','EDA_G_raw','EDA_SCL','EDA_SCR','EDA_SCRpeak','EDA_SCRmin',
+                            'EDA_Cx','EDA_Cy','EDA_Cr','EDA_Cfit','EDA_SQI','EDA_Arousal_vendor','EDA_bat'];
+const EDAZ_EXPORT_COLUMNS = EDA_FREQS.flatMap(f=>[`Z${f}_re`,`Z${f}_im`]);
+const GSR_EXPORT_COLUMNS = ['GSR_raw','GSR_uS','GSR_ohm'];
+EXPORT_GROUPS.push({ key:'EDA',  cols:EDA_EXPORT_COLUMNS });
+EXPORT_GROUPS.push({ key:'EDAZ', cols:EDAZ_EXPORT_COLUMNS });
+EXPORT_GROUPS.push({ key:'GSR',  cols:GSR_EXPORT_COLUMNS });
+
+/* 曲线样式 */
+lineformat.EDA_G   = defineLine('14,124,134','G 12Hz (µS)','lines');
+lineformat.EDA_SCL = defineLine('179,53,44','SCL (µS)','lines');
+lineformat.EDA_SCR = defineLine('47,107,69','SCR (µS)','lines');
+lineformat.GSR_uS  = defineLine('14,124,134','GSR (µS)','lines');
+lineformat.GSR_raw = defineLine('154,83,22','GSR raw','lines');
+
+/* 设备与流登记：让 UI 的设备卡片 / 录制主控能一视同仁地管它们 */
+devices.LyraEDA = { type:'LyraEDA', output:['EDA'] };
+devices.GSR     = { type:'GSR',     output:['GSR'] };
+streams.EDA = { name:'EDA', id:100, type:'Electrodermal activity', code_start:[] };
+streams.GSR = { name:'GSR', id:101, type:'Galvanic skin response', code_start:[] };
+
+/* ---------------- COBS ---------------- */
+function cobsDecode(buf){                       // 入参不含结尾 0x00
+  const out=[]; let i=0;
+  while(i<buf.length){
+    const code=buf[i]; if(code===0) break;
+    i++;
+    for(let k=0;k<code-1 && i<buf.length;k++) out.push(buf[i++]);
+    if(code!==0xFF && i<buf.length) out.push(0);
+  }
+  return Uint8Array.from(out);
+}
+function cobsEncode(buf){                       // 返回 [code][data...] 0x00
+  const out=[0]; let codeIdx=0, code=1;
+  for(let i=0;i<buf.length;i++){
+    if(buf[i]===0){ out[codeIdx]=code; codeIdx=out.length; out.push(0); code=1; }
+    else{ out.push(buf[i]); code++;
+          if(code===0xFF){ out[codeIdx]=code; codeIdx=out.length; out.push(0); code=1; } }
+  }
+  out[codeIdx]=code;
+  out.push(0);
+  return Uint8Array.from(out);
+}
+
+/* ---------------- 极简 protobuf ----------------
+   只覆盖本设备用到的两个消息，避免为了 3 个字段引进 200KB 的 google-protobuf。
+   EdaBuffer { repeated Impedance data = 1; Timestamp timestamp = 2; }
+   Impedance { float real = 1; float imag = 2; }
+   Timestamp { uint64 time = 1; uint32 us = 2; }                              */
+function pbVarint(u8,p){ let v=0,s=0,b; do{ b=u8[p.i++]; v+=(b&0x7f)*Math.pow(2,s); s+=7; }while(b>=0x80); return v; }
+function pbParseEdaBuffer(u8){
+  const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+  const p={i:0}; const imp=[]; let t_s=0,t_us=0;
+  while(p.i<u8.length){
+    const key=pbVarint(u8,p), field=key>>>3, wire=key&7;
+    if(wire!==2){ if(wire===0) pbVarint(u8,p); else if(wire===5) p.i+=4; else if(wire===1) p.i+=8; else break; continue; }
+    const len=pbVarint(u8,p), end=p.i+len;
+    if(field===1){                                   // Impedance
+      let re=0,im=0;
+      while(p.i<end){
+        const k2=pbVarint(u8,p), f2=k2>>>3, w2=k2&7;
+        if(w2===5){ const v=dv.getFloat32(p.i,true); p.i+=4; if(f2===1) re=v; else if(f2===2) im=v; }
+        else if(w2===0) pbVarint(u8,p);
+        else if(w2===2){ const l2=pbVarint(u8,p); p.i+=l2; }
+        else break;
+      }
+      imp.push({re,im});
+    } else if(field===2){                            // Timestamp
+      while(p.i<end){
+        const k2=pbVarint(u8,p), f2=k2>>>3, w2=k2&7;
+        if(w2===0){ const v=pbVarint(u8,p); if(f2===1) t_s=v; else if(f2===2) t_us=v; }
+        else if(w2===2){ const l2=pbVarint(u8,p); p.i+=l2; }
+        else if(w2===5) p.i+=4; else break;
+      }
+    }
+    p.i=end;
+  }
+  return { imp, t_s, t_us };
+}
+function pbEncodeTimestamp(sec,us){
+  const out=[];
+  const varint=(n)=>{ while(n>127){ out.push((n&0x7f)|0x80); n=Math.floor(n/128); } out.push(n); };
+  out.push(0x08); varint(sec);
+  out.push(0x10); varint(us);
+  return Uint8Array.from(out);
+}
+
+/* ---------------- Nyquist 圆拟合 ----------------
+   16 个频点的复阻抗在复平面上应落在一段圆弧上（Cole 模型）。厂商上位机用
+   JSXGraph 的矩阵运算做最小二乘拟合圆，这里用纯 JS 解同一个方程，省掉 700KB 依赖：
+       min_z ||M z - y||²,  M 行 = [x, y, 1],  y = x²+y²
+       解 (MᵀM) z = Mᵀy  →  xm=z0/2, ym=z1/2, r=√(z2+xm²+ym²)
+   另加一个厂商没有的 cfit = 16 点到拟合圆的 RMS 残差 / 半径：
+   这是接触质量的硬指标。接触好时 16 点规整落在弧上（cfit 小，通常 <0.1）；
+   接触不良时是一团散点，拟合圆没有物理意义（cfit 大）。 */
+function fitCircle(pts){
+  const n = pts.length;
+  if(n < 3) return null;
+  let Sxx=0,Sxy=0,Sx=0,Syy=0,Sy=0,S1=0,Bx=0,By=0,B1=0;
+  for(const q of pts){
+    const x=q.re, y=q.im, w=x*x+y*y;
+    Sxx+=x*x; Sxy+=x*y; Sx+=x; Syy+=y*y; Sy+=y; S1+=1;
+    Bx+=x*w; By+=y*w; B1+=w;
+  }
+  const A=[[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,S1]], b=[Bx,By,B1];
+  for(let i=0;i<3;i++){
+    let piv=i;
+    for(let k=i+1;k<3;k++) if(Math.abs(A[k][i])>Math.abs(A[piv][i])) piv=k;
+    if(Math.abs(A[piv][i])<1e-12) return null;
+    const ta=A[i]; A[i]=A[piv]; A[piv]=ta;
+    const tb=b[i]; b[i]=b[piv]; b[piv]=tb;
+    for(let k=i+1;k<3;k++){
+      const f=A[k][i]/A[i][i];
+      for(let j=i;j<3;j++) A[k][j]-=f*A[i][j];
+      b[k]-=f*b[i];
+    }
+  }
+  const z=[0,0,0];
+  for(let i=2;i>=0;i--){
+    let t=b[i];
+    for(let j=i+1;j<3;j++) t-=A[i][j]*z[j];
+    z[i]=t/A[i][i];
+  }
+  const xm=z[0]*0.5, ym=z[1]*0.5, rr=z[2]+xm*xm+ym*ym;
+  if(!(rr>0)) return null;
+  const r=Math.sqrt(rr);
+  let se=0;
+  for(const q of pts){ const d=Math.hypot(q.re-xm,q.im-ym)-r; se+=d*d; }
+  return { cx:xm, cy:ym, r, cfit:Math.sqrt(se/n)/r };
+}
+
+/* ---------------- SCL / SCR 处理 ----------------
+   与厂商上位机同口径：取 12 Hz 一路算电导，指数平滑分出 tonic(SCL) / phasic(SCR)。 */
+class EdaProc{
+  constructor(fs=8,alpha=0.04,thr=0.02,minGap=2.0){
+    this.fs=fs; this.a=alpha; this.thr=thr; this.gap=minGap;
+    this.scl=null; this.hist=[]; this.lastPeak=-1e9; this.g=[];
+    this.deint=true; this.prevG=null;
+    this.peakT=[]; this.peakA=[];        // 60 秒滑窗内的峰 → SCR/min 与厂商 arousal
+  }
+  update(t,imp){
+    const z=imp[0]||{re:0,im:0};
+    const mag=Math.hypot(z.re,z.im);
+    const Graw = mag<1e-9 ? 0 : 1e6/mag;                     // 西门子→µS
+    /* 去交替：设备在两组激励之间轮流测，12Hz 这一路天生逐样本 2:1 跳，
+       和电极贴得好不好无关（2026-09-03 实测：28–108Hz 各频点 lag-1 达 -0.9）。
+       长度 2 的滑动平均正好在 Nyquist 处开零点，把这个分量精确抵消：
+       实测 lag-1 -0.358 → +0.742，std 8.84 → 5.02。
+       中值 3 处理不了 2 相交织（实测反而恶化到 -0.520），别用。
+       只影响 SCL/SCR/波形；EDA_G_raw 和 16 频点原始阻抗照原样进 CSV。 */
+    let G = Graw;
+    if(this.deint && this.prevG!==null) G = (Graw + this.prevG) / 2;
+    this.prevG = Graw;
+    this.scl = (this.scl===null) ? G : this.a*G+(1-this.a)*this.scl;
+    const scr = G-this.scl;
+    /* 峰检测：局部极大 + 幅度阈值 + 最小间隔 */
+    this.hist.push({t,v:scr}); if(this.hist.length>this.fs*3) this.hist.shift();
+    let peak=false;
+    if(this.hist.length>=3){
+      const n=this.hist.length, c=this.hist[n-2];
+      if(c.v>this.hist[n-3].v && c.v>=this.hist[n-1].v && c.v>=this.thr && (c.t-this.lastPeak)>=this.gap){
+        this.lastPeak=c.t; peak=true;
+        this.peakT.push(c.t); this.peakA.push(c.v);
+      }
+    }
+    /* 60 秒滑窗 → SCR/min。厂商 arousal = min(100, 峰频×15 + 平均幅度×200)，
+       是厂商自编的启发式、无文献依据，导出只为和他们的上位机对得上，勿用于发表。 */
+    while(this.peakT.length && t-this.peakT[0]>60){ this.peakT.shift(); this.peakA.shift(); }
+    const scrPerMin=this.peakT.length;
+    const meanAmp=this.peakA.length ? this.peakA.reduce((a,b)=>a+b,0)/this.peakA.length : 0;
+    const arousal=this.peakA.length ? Math.round(Math.min(100, scrPerMin*15+meanAmp*200)) : 0;
+    /* 信号质量：动态范围 + 接触阻抗 + 噪声 */
+    this.g.push(G); if(this.g.length>this.fs*4) this.g.shift();
+    let sqi=0;
+    if(this.g.length>=8){
+      const mn=Math.min(...this.g), mx=Math.max(...this.g);
+      sqi += Math.min(40,(mx-mn)*400);
+      const mean=this.g.reduce((a,b)=>a+b,0)/this.g.length;
+      const sd=Math.sqrt(this.g.reduce((s,v)=>s+(v-mean)**2,0)/this.g.length);
+      sqi += Math.min(30,Math.max(0,30-sd*60));
+    }
+    sqi += (mag>1000&&mag<1e7) ? 30 : (mag>0?15:0);
+    return { G, Graw, scl:this.scl, scr, peak, scrPerMin, arousal, sqi:Math.round(Math.min(100,sqi)) };
+  }
+}
+
+/* ---------------- 只给绘图 trace 留滚动窗口，dataobject 仍保留全量 ---------------- */
+function trimTraces(name, ids, max){
+  const T=traces[name]; if(!T) return;
+  for(const id of ids){ const tr=T[id]; if(tr && tr.x.length>max){ tr.x=tr.x.slice(-max); tr.y=tr.y.slice(-max); } }
+}
+
+/* ---------------- Nyquist 实时小图 ----------------
+   16 个频点在复平面上的分布 + 拟合圆。这是判断电极接触的最直观工具：
+   接触良好时 16 点沿一段圆弧规整排列；接触不良时是一团散点。
+   注意纵轴按惯例反向（阻抗虚部为负，图上向上画）。 */
+function drawNyquist(name){
+  const cv = document.getElementById('nyq'+name);
+  const S  = EDA.state[name];
+  if(!cv || !S || !S.lastImp) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 200, h = cv.clientHeight || 150;
+  if(cv.width !== Math.round(w*dpr)){ cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr); }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+
+  const pts = S.lastImp, cf = S.lastCirc;
+  let xs = pts.map(q=>q.re), ys = pts.map(q=>q.im);
+  if(cf && cf.r){ xs = xs.concat([cf.cx-cf.r, cf.cx+cf.r]); ys = ys.concat([cf.cy-cf.r, cf.cy+cf.r]); }
+  let x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+  const px=(x1-x0)*0.12||1, py=(y1-y0)*0.12||1;
+  x0-=px; x1+=px; y0-=py; y1+=py;
+  const sc = Math.min((w-8)/(x1-x0), (h-8)/(y1-y0));
+  const ox = (w-(x1-x0)*sc)/2, oy = (h-(y1-y0)*sc)/2;
+  const X = v => ox+(v-x0)*sc;
+  const Y = v => h-oy-(v-y0)*sc;          // 虚部为负，翻上去，符合 Nyquist 习惯
+
+  const css = getComputedStyle(document.documentElement);
+  const acc = (css.getPropertyValue('--accent')||'#0E7C86').trim();
+  const rec = (css.getPropertyValue('--rec')||'#B3352C').trim();
+  const mut = (css.getPropertyValue('--muted')||'#6B7A82').trim();
+
+  if(cf && cf.r){
+    g.strokeStyle=rec; g.lineWidth=1; g.setLineDash([4,3]); g.beginPath();
+    for(let k=0;k<=48;k++){
+      const a=k/48*Math.PI*2, xx=X(cf.cx+cf.r*Math.cos(a)), yy=Y(cf.cy+cf.r*Math.sin(a));
+      k? g.lineTo(xx,yy) : g.moveTo(xx,yy);
+    }
+    g.stroke(); g.setLineDash([]);
+  }
+  g.fillStyle=acc;
+  for(const q of pts){ g.beginPath(); g.arc(X(q.re), Y(q.im), 2.4, 0, Math.PI*2); g.fill(); }
+  g.fillStyle=mut; g.font='9px monospace';
+  g.fillText('12Hz', X(pts[0].re)+4, Y(pts[0].im)-4);
+  g.fillText('724', X(pts[15].re)+4, Y(pts[15].im)-4);
+  if(cf && cf.cfit!=null && cf.cfit!==''){
+    g.fillStyle = cf.cfit<0.10 ? acc : rec;
+    g.font='10px monospace';
+    g.fillText('cfit '+cf.cfit.toFixed(3), 4, 11);
+  }
+}
+
+/* ---------------- Y 轴自适应 ---------------- */
+function edaAutoRange(name, v){
+  const L=layoutCombined[name]; if(!L||!L.yaxis) return;
+  const r=L.yaxis.range;
+  if(v>r[1]*0.95){ r[1]=v*1.25; updatecombined[name]=true; }
+  if(v<r[0]+ (r[1]-r[0])*0.05){ r[0]=Math.max(0,v-(r[1]-v)*0.15); updatecombined[name]=true; }
+}
+
+/* ============================ A. 天琴座 Lyra（BLE） ============================ */
+const EDA = (function(){
+const state = {};   // state[name] = {device,server,txChar,rxChar,batChar,buf,proc,notifying}
+
+async function connect(){
+  const btn=document.getElementById('btnEDA'); if(btn) btn.disabled=true;
+  try{
+    if(!navigator.bluetooth) throw new Error('这个浏览器没有 Web Bluetooth，请用 Chrome / Edge');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: EDA_NAME_PREFIXES.map(p=>({namePrefix:p})),
+      optionalServices:[EDA_NUS,'device_information','battery_service']
+    });
+    const name = device.name || 'LyraEDA';
+    if(obj[name]) { alert('这台设备已经连上了'); return; }
+    device.addEventListener('gattserverdisconnected', onEdaDisconnected);
+
+    if(device.gatt.connected){ try{ device.gatt.disconnect(); }catch(e){} }
+    let server=null, lastErr=null;
+    for(let attempt=0; attempt<2 && !server; attempt++){
+      try{
+        server = await device.gatt.connect();
+        await sleep(300);                       // 等连接参数协商完，否则服务发现常在首次失败
+        await server.getPrimaryService(EDA_NUS);
+      }catch(e){ lastErr=e; server=null; try{ device.gatt.disconnect(); }catch(_){} await sleep(400); }
+    }
+    if(!server) throw lastErr || new Error('GATT 连接失败');
+
+    const nus = await server.getPrimaryService(EDA_NUS);
+    const txChar = await nus.getCharacteristic(EDA_CHAR_TX);   // notify
+    let rxChar=null; try{ rxChar = await nus.getCharacteristic(EDA_CHAR_RX); }catch(e){}
+
+    let fw='', batChar=null;
+    try{
+      const dis = await server.getPrimaryService('device_information');
+      const c = await dis.getCharacteristic('firmware_revision_string');
+      fw = new TextDecoder().decode(await c.readValue());
+    }catch(e){}
+    try{
+      const bas = await server.getPrimaryService('battery_service');
+      batChar = await bas.getCharacteristic('battery_level');
+      await batChar.startNotifications();
+      batChar.addEventListener('characteristicvaluechanged', e=>{
+        const v=e.target.value.getUint8(0);
+        state[name].bat=v;
+        const el=document.getElementById('bpm'+name); if(el) el.textContent=v+'%';
+      });
+      const v=await batChar.readValue(); state[name]={...(state[name]||{}),bat:v.getUint8(0)};
+    }catch(e){}
+
+    obj[name] = { type:'LyraEDA', kind:'eda', output:['EDA'], device, server, fw };
+    state[name] = { ...(state[name]||{}), device, server, txChar, rxChar, batChar,
+                    buf:new Uint8Array(0), proc:new EdaProc(), notifying:false, nSkip:0 };
+
+    layoutCombined[name]=JSON.parse(JSON.stringify(layoutCombinedg));
+    layoutCombined[name].yaxis.range=[0,20];
+
+    txChar.addEventListener('characteristicvaluechanged', ev=>onEdaPacket(name, ev));
+
+    UI.buildDeviceCard(name,'LyraEDA');
+    const el=document.getElementById('bpm'+name);
+    if(el && state[name].bat!=null) el.textContent=state[name].bat+'%';
+    const sz=document.getElementById('size'+name); if(sz) sz.textContent = fw?('fw '+fw):'—';
+
+    await setClock(name);                       // 对表：设备 RTC ← 浏览器时钟
+    UI.updateStatus();
+  }catch(err){
+    if(err && err.name==='NotFoundError') { /* 用户取消选择，不弹框 */ }
+    else { console.error('EDA connect', err); alert('皮肤电连接失败：'+(err.message||err)); }
+  }finally{
+    const b=document.getElementById('btnEDA'); if(b) b.disabled=false;
+  }
+}
+
+async function setClock(name){
+  const S=state[name]; if(!S||!S.rxChar) return;
+  const now=Date.now();
+  const sec=Math.floor(now/1000), us=(now-sec*1000)*1000;
+  const frame=cobsEncode(pbEncodeTimestamp(sec,us));
+  try{ await S.rxChar.writeValueWithoutResponse(frame); }
+  catch(e){ try{ await S.rxChar.writeValue(frame); }catch(e2){ console.warn('EDA 对表失败',e2); } }
+}
+
+function onEdaPacket(name, ev){
+  const S=state[name]; if(!S) return;
+  const dv=ev.target.value;
+  const chunk=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);  // 只取真正收到的这几个字节
+  const merged=new Uint8Array(S.buf.length+chunk.length);
+  merged.set(S.buf,0); merged.set(chunk,S.buf.length);
+  S.buf=merged;
+  const arrival=Date.now();
+  let z;
+  while((z=S.buf.indexOf(0))!==-1){                 // 一次通知里可能有多帧，必须循环取干净
+    const frame=S.buf.slice(0,z);
+    S.buf=S.buf.slice(z+1);
+    if(frame.length) handleEdaFrame(name, cobsDecode(frame), arrival);
+  }
+  if(S.buf.length>4096) S.buf=new Uint8Array(0);    // 兜底，别让坏帧把缓冲撑爆
+}
+
+function handleEdaFrame(name, payload, arrival){
+  let msg;
+  try{ msg=pbParseEdaBuffer(payload); }catch(e){ return; }
+  if(!msg.imp.length) return;
+  const S=state[name];
+
+  /* 设备时钟 → 与 Polar 同一根时间轴（ms since 2000） */
+  let devMs = msg.t_s*1000 + msg.t_us/1000 - EPOCH_2000_TO_1970;
+  const sysMs = arrival;
+  if(!isFinite(devMs) || Math.abs((devMs+EPOCH_2000_TO_1970)-sysMs) > 86400000){
+    devMs = sysMs - EPOCH_2000_TO_1970;            // RTC 没对上就退回到达时刻
+  }
+
+  if(starttime[name]===undefined){ starttime[name]=devMs; systemStartUTC[name]=sysMs; if(!firstTime) firstTime=sysMs; }
+
+  const m=S.proc.update(devMs/1000, msg.imp);
+
+  const cf = fitCircle(msg.imp) || {cx:'',cy:'',r:'',cfit:''};
+  S.lastCirc = cf; S.lastImp = msg.imp;
+  const ids=['EDA_G','EDA_G_raw','EDA_SCL','EDA_SCR','EDA_SCRpeak','EDA_SCRmin',
+             'EDA_Cx','EDA_Cy','EDA_Cr','EDA_Cfit','EDA_SQI','EDA_Arousal_vendor','EDA_bat'];
+  const vals=[[m.G],[m.Graw],[m.scl],[m.scr],[m.peak?1:0],[m.scrPerMin],
+              [cf.cx],[cf.cy],[cf.r],[cf.cfit],[m.sqi],[m.arousal],[S.bat==null?'':S.bat]];
+  pushData(name, ids, [devMs], vals);
+
+  const zids=[], zvals=[];
+  for(let i=0;i<EDA_FREQS.length;i++){
+    const z=msg.imp[i]||{re:'',im:''};
+    zids.push(`Z${EDA_FREQS[i]}_re`, `Z${EDA_FREQS[i]}_im`);
+    zvals.push([z.re],[z.im]);
+  }
+  pushData(name, zids, [devMs], zvals);
+  trimTraces(name, zids, 2);                                  // 这 32 路只进 CSV，不进图
+  trimTraces(name, ['EDA_SCRpeak','EDA_SCRmin','EDA_Cx','EDA_Cy','EDA_Cr','EDA_Cfit',
+                    'EDA_SQI','EDA_Arousal_vendor','EDA_bat'], 2);
+
+  trimTraces(name,['EDA_G','EDA_SCL','EDA_SCR'],2400);   // 5 min @8Hz
+  trimTraces(name,['EDA_G_raw'],2);                     // 只进 CSV，不进图
+  pushSyncPair(name,'EDA',devMs,sysMs);
+  edaAutoRange(name, Math.max(m.G, m.scl));
+  updatecombined[name]=true;
+
+  const el=document.getElementById('size'+name);
+  if(el && (S.nSkip=(S.nSkip||0)+1)%4===0){
+    const q = (cf.cfit!=='' && cf.cfit!=null) ? ' · 拟合 '+cf.cfit.toFixed(2) : '';
+    el.textContent = m.G.toFixed(2)+' µS · SQI '+m.sqi+q;
+  }
+  if((S.nyqSkip=(S.nyqSkip||0)+1)%2===0) drawNyquist(name);   // canvas 画一次约 0.1ms，不构成负担
+}
+
+async function startStream(name){
+  const S=state[name]; if(!S) return;
+  S.wantStream = true;                    // 记住"应该在录"，重连后自动恢复
+  if(!S.notifying){ await S.txChar.startNotifications(); S.notifying=true; }
+  const b=document.getElementById(name+'EDA'); if(b) b.checked=true;
+  setStreamFlag(name,'EDA',true);
+}
+async function stopStream(name){
+  const S=state[name]; if(!S) return;
+  S.wantStream = false;
+  if(S.notifying){ try{ await S.txChar.stopNotifications(); }catch(e){} S.notifying=false; }
+  const b=document.getElementById(name+'EDA'); if(b) b.checked=false;
+  setStreamFlag(name,'EDA',false);
+}
+/* ★ 2026-09-06：天琴座掉线不再当成"设备没了"。
+   这台设备的连接监管超时只有 2 秒（厂商文档载明，固件 1.0.0），
+   主线程只要卡顿 2 秒以上链路就断。以前一断就删卡片、清流状态，
+   整场录制作废；现在改成自动重连 + 把缺口记进 CSV。
+   录制状态不清，重连成功后自动把数据流打开，接着往同一份缓冲里写。 */
+async function onEdaDisconnected(event){
+  const name = event.target.name;
+  const S = state[name];
+  logLink(name, 'disconnect', '');
+  if(!S || S.closing){
+    UI.removeDeviceCard(name);
+    delete obj[name]; delete streamFlags[name]; delete state[name];
+    recomputeRecordingActive(); UI.updateStatus();
+    return;
+  }
+  S.reconnecting = true;
+  S.notifying = false;
+  S.buf = new Uint8Array(0);
+  markCardState(name, '掉线，重连中…');
+  UI.updateStatus();
+  const ok = await reconnect(name);
+  if(!ok){
+    logLink(name, 'give-up', '20 次重连失败');
+    UI.removeDeviceCard(name);
+    delete obj[name]; delete streamFlags[name]; delete state[name];
+    recomputeRecordingActive(); UI.updateStatus();
+  }
+}
+
+function logLink(dev, ev, detail){
+  const t = Date.now();
+  try{ window.dropLog.push({ t, iso:new Date(t).toISOString(), dev, ev, detail }); }catch(e){}
+  console.warn('[EDA link]', dev, ev, detail);
+}
+function markCardState(name, txt){
+  const el = document.getElementById('size'+name);
+  if(el) el.textContent = txt;
+}
+
+async function reconnect(name){
+  const S = state[name];
+  const t0 = Date.now();
+  for(let attempt=1; attempt<=20; attempt++){
+    if(!state[name] || state[name].closing) return false;
+    await sleep(Math.min(8000, 400*attempt));      // 退避：0.4s 起，封顶 8s
+    markCardState(name, `重连中 ${attempt}/20…`);
+    try{
+      const server = await S.device.gatt.connect();
+      await sleep(300);
+      const nus = await server.getPrimaryService(EDA_NUS);
+      const txChar = await nus.getCharacteristic(EDA_CHAR_TX);
+      let rxChar = null;
+      try{ rxChar = await nus.getCharacteristic(EDA_CHAR_RX); }catch(e){}
+      txChar.addEventListener('characteristicvaluechanged', ev=>onEdaPacket(name, ev));
+      S.server=server; S.txChar=txChar; S.rxChar=rxChar; S.buf=new Uint8Array(0);
+      try{
+        const bas = await server.getPrimaryService('battery_service');
+        S.batChar = await bas.getCharacteristic('battery_level');
+        await S.batChar.startNotifications();
+        S.batChar.addEventListener('characteristicvaluechanged', e=>{ S.bat = e.target.value.getUint8(0); });
+      }catch(e){}
+      obj[name] = { type:'LyraEDA', kind:'eda', output:['EDA'], device:S.device, server, fw:S.fw };
+      S.reconnecting = false;
+      await setClock(name);                        // 重连后必须重新对表
+      if(S.wantStream){ S.notifying=false; await startStream(name); }
+      logLink(name, 'reconnect', `第 ${attempt} 次成功，缺口 ${((Date.now()-t0)/1000).toFixed(1)} s`);
+      markCardState(name, '已重连');
+      UI.updateStatus();
+      return true;
+    }catch(e){ /* 继续退避重试 */ }
+  }
+  return false;
+}
+function setDeint(name,on){ const S=state[name]; if(S&&S.proc){ S.proc.deint=!!on; S.proc.prevG=null; } }
+return { connect, startStream, stopStream, setClock, setDeint, state };
+})();
+
+/* ====================== B. Arduino 模拟 GSR（Web Serial） ====================== */
+const GSR = (function(){
+const state = {};   // state[name] = {port, reader, running, t0sys, t0dev, adcMax}
+
+/* Grove GSR 换算：R_human = ((1024 + 2v) * 10000) / (512 - v)  欧姆（10 bit ADC）
+   ★ 2026-09-04 心算应激实验实测：Grove 原式的极性对这块淘宝模块是反的。
+     标记后 ADC 从 165 涨到 238（+44%），同一时间独立通道心率从 69.3 涨到 72.6，
+     两者 30 秒分箱相关 r=+0.674 —— 也就是「ADC 上升 = 唤醒上升 = 电导上升」。
+     而 Grove 原式把 ADC 上升算成电阻上升（电导下降），方向正好相反。
+     Grove 原式要求读数落在 0~511，所以极性翻转用中点镜像 v' = 511 - v 再套原式，
+     既翻了方向又留在公式的定义域内。
+   注意：这块模块没有校准，µS 的绝对值别当真，只能当相对唤醒指标用；
+     GSR_raw 永远是原始 ADC，不受这个开关影响。 */
+function toOhm(v10, flip){
+  let v = flip ? (511 - v10) : v10;
+  if(v < 0) v = 0;
+  if(v >= 511) return null;
+  return ((1024 + 2*v) * 10000) / (512 - v);
+}
+
+async function connect(){
+  const btn=document.getElementById('btnGSR'); if(btn) btn.disabled=true;
+  try{
+    if(!navigator.serial) throw new Error('这个浏览器没有 Web Serial，请用 Chrome / Edge，并从 https 或本地文件打开');
+    const port = await navigator.serial.requestPort();
+    const baud = parseInt(document.getElementById('gsrBaud')?.value || '115200',10);
+    await port.open({ baudRate: baud });
+
+    const info = port.getInfo ? port.getInfo() : {};
+    let name = 'GSR ' + (info.usbProductId!=null ? (info.usbVendorId.toString(16)+':'+info.usbProductId.toString(16)) : 'serial');
+    let n=1; while(obj[name]) name = 'GSR#'+(++n);
+
+    obj[name] = { type:'GSR', kind:'gsr', output:['GSR'], port };
+    state[name] = { port, running:false, t0sys:null, t0dev:null,
+                    adcMax: parseInt(document.getElementById('gsrBits')?.value||'1023',10),
+                    flip: (document.getElementById('gsrPol')?.value||'up') === 'up' };
+
+    layoutCombined[name]=JSON.parse(JSON.stringify(layoutCombinedg));
+    layoutCombined[name].yaxis.range=[0,20];
+
+    UI.buildDeviceCard(name,'GSR');
+    const sz=document.getElementById('size'+name); if(sz) sz.textContent='等待数据…';
+    UI.updateStatus();
+  }catch(err){
+    if(err && err.name==='NotFoundError'){ /* 取消 */ }
+    else { console.error('GSR connect',err); alert('串口连接失败：'+(err.message||err)); }
+  }finally{
+    const b=document.getElementById('btnGSR'); if(b) b.disabled=false;
+  }
+}
+
+async function startStream(name){
+  const S=state[name]; if(!S||S.running) return;
+  /* ★ 2026-09-04 实录发现的 bug：串口一 open，Chrome 就开始往缓冲区堆数据。
+     从「连接」到「开始录制」之间隔多久，缓冲里就积压多少行；一开始读，这些
+     陈旧行会以几乎相同的到达时刻被一次性灌进来，t0dev 锚在最老的一行上，
+     整条 GSR 时间轴就恒定超前那段间隔（实录里是 -19142 ms）。
+     修法：开录后先丢掉 400 ms 内的所有行（积压在内存里，瞬间就排空了），
+     再用之后到达的第一行做锚点。10 Hz 下只损失 4 个样本。 */
+  S.running=true; S.t0sys=null; S.t0dev=null;
+  S.primeUntil = Date.now() + 400;
+  const b=document.getElementById(name+'GSR'); if(b) b.checked=true;
+  setStreamFlag(name,'GSR',true);
+  readLoop(name);
+}
+async function stopStream(name){
+  const S=state[name]; if(!S) return;
+  S.running=false;
+  try{ if(S.reader){ await S.reader.cancel(); S.reader.releaseLock(); S.reader=null; } }catch(e){}
+  const b=document.getElementById(name+'GSR'); if(b) b.checked=false;
+  setStreamFlag(name,'GSR',false);
+}
+
+async function readLoop(name){
+  const S=state[name];
+  const dec=new TextDecoder();
+  let carry='';
+  try{
+    S.reader = S.port.readable.getReader();
+    while(S.running){
+      const {value,done}=await S.reader.read();
+      if(done) break;
+      carry += dec.decode(value,{stream:true});
+      const lines=carry.split(/\r?\n/);
+      carry=lines.pop();
+      const arrival=Date.now();
+      for(const raw of lines){
+        const line=raw.trim(); if(!line) continue;
+        handleLine(name,line,arrival);
+      }
+      if(carry.length>512) carry='';
+    }
+  }catch(e){
+    if(S.running) console.error('GSR read',e);
+  }finally{
+    try{ if(S.reader){ S.reader.releaseLock(); S.reader=null; } }catch(e){}
+  }
+}
+
+function handleLine(name,line,arrival){
+  const S=state[name];
+  if(S.primeUntil && arrival < S.primeUntil) return;      // 排空积压
+  const parts=line.split(/[,\s;]+/).map(Number).filter(v=>isFinite(v));
+  if(!parts.length) return;
+
+  let devMillis=null, adc=null;
+  if(parts.length>=2){ devMillis=parts[0]; adc=parts[1]; }
+  else { adc=parts[0]; }
+
+  /* 时间轴：有 millis 就用它保持采样间隔平滑，只用首样本对一次系统时钟 */
+  let devMs;
+  if(devMillis!=null){
+    if(S.t0dev===null){ S.t0dev=devMillis; S.t0sys=arrival; }
+    devMs = (S.t0sys + (devMillis - S.t0dev)) - EPOCH_2000_TO_1970;
+    /* 兜底：板子中途复位、或积压比 prime 窗口还长时，millis 与墙钟会整体偏掉。
+       偏过 2 秒就重新锚一次，避免整条时间轴带着固定误差走完全程。 */
+    if(Math.abs((devMs + EPOCH_2000_TO_1970) - arrival) > 2000){
+      S.t0dev=devMillis; S.t0sys=arrival;
+      devMs = arrival - EPOCH_2000_TO_1970;
+      console.warn('GSR 时间轴重新锚定（板子复位或串口积压）');
+    }
+  } else {
+    devMs = arrival - EPOCH_2000_TO_1970;
+  }
+
+  if(starttime[name]===undefined){ starttime[name]=devMs; systemStartUTC[name]=arrival; if(!firstTime) firstTime=arrival; }
+
+  const v10 = S.adcMax===1023 ? adc : Math.round(adc*1023/S.adcMax);
+  const ohm = toOhm(v10, S.flip);
+  const uS  = ohm ? 1e6/ohm : '';
+
+  pushData(name,['GSR_raw','GSR_uS','GSR_ohm'],[devMs],[[adc],[uS],[ohm==null?'':Math.round(ohm)]]);
+  trimTraces(name,['GSR_uS','GSR_raw'],3000);
+  trimTraces(name,['GSR_ohm'],2);
+  pushSyncPair(name,'GSR',devMs,arrival);
+  if(typeof uS==='number') edaAutoRange(name,uS);
+  updatecombined[name]=true;
+
+  const el=document.getElementById('size'+name);
+  if(el && (S.n=(S.n||0)+1)%5===0) el.textContent = (typeof uS==='number'? uS.toFixed(2)+' µS':'--') + ' · adc '+adc;
+}
+
+function disconnectAll(){
+  for(const name in state){
+    stopStream(name);
+    try{ state[name].port.close(); }catch(e){}
+  }
+}
+return { connect, startStream, stopStream, disconnectAll, state };
+})();
+
+</script>
+
+<script>
+/* =========================================================
+   UI 层 —— 2026-09-03
+   引擎（PMD 解包 / 时间戳 / CSV / 时钟同步 / 落盘）未改动。
+   这里只负责：i18n、状态栏、设备卡片、同步表格、标记样式、录制主控。
+   ========================================================= */
+const UI = (function(){
+
+/* ---------- 名义采样率，只用于在界面上显示带宽代价 ---------- */
+const RATE = { SDK:null, PPG:176, ACC_Sense:416, ECG:130, ACC_H10:200, EDA:8, GSR:null };
+
+/* ---------- i18n ---------- */
+const I18N = {
+  zh:{
+    'app.name':'Polar 采集台','theme.light':'浅色','theme.dark':'深色',
+    'state.idle':'待机','state.armed':'就绪','state.rec':'录制中','state.done':'已停止',
+    'st.elapsed':'已录时长','st.devices':'设备','st.samples':'已采样本','st.files':'已落盘',
+    'st.notarget':'未选输出位置','st.folder':'输出文件夹','st.download':'浏览器下载',
+    'warn.plotly':'图形库未能加载（可能离线）。数据采集与落盘不受影响，只是没有实时波形。',
+    'empty.title':'还没有连接传感器',
+    'empty.sub':'这个页面用 Web Bluetooth 直接和 Polar H10 / Verity Sense、天琴座皮肤电通讯，串口 GSR 走 Web Serial，都不需要装任何东西。请用 Chrome 或 Edge 打开。',
+    'empty.s1':'先在右侧「输出」里选好保存文件夹 —— 不选就只存在内存里，刷新即丢',
+    'empty.s2':'点上面的按钮，在弹窗里选你的设备；要连多台就点多次',
+    'empty.s3':'勾选需要的数据流，然后点「开始录制」',
+    'btn.connect':'连接传感器','btn.addDevice':'+ 连接另一台传感器',
+    'btn.start':'开始录制','btn.stop':'停止录制',
+    'sec.control':'采集控制','sec.output':'输出','sec.markers':'事件标记','sec.sync':'时钟同步','sec.mklog':'标记记录',
+    'ctl.hint.nodev':'先连接至少一台传感器。',
+    'ctl.hint.nostream':'至少勾选一路数据流。',
+    'ctl.hint.nofolder':'还没选输出文件夹 —— 可以先录，但数据只在内存里。',
+    'ctl.hint.ready':'准备就绪。开始后请保持这个标签页在前台。',
+    'ctl.hint.rec':'录制中。切走标签页会让自动落盘降频到一分钟以上。',
+    'btn.pickFolder':'选择输出文件夹','btn.exportNow':'导出当前缓冲','btn.clear':'清空缓冲',
+    'out.note':'每 60 秒把新增数据增量写入该文件夹；停止时另外合并出一份 FULL 文件。不选文件夹会退化成浏览器自动下载。',
+    'mk.ph':'标记名称，如「起步」','btn.mkAdd':'添加','mk.empty':'还没有标记按钮',
+    'btn.mkSave':'保存集合','btn.mkLoad':'载入','btn.mkClear':'清空',
+    'sync.hint':'实时','sync.note':'jitter 两列相对窗口内最小到达差，与表内时钟是否对过无关，可直接横向比较设备。',
+    'sync.empty':'开始录制后显示。',
+    'mklog.time':'时刻','mklog.unix':'UNIX','mklog.rel':'相对秒','mklog.name':'标记',
+    'dev.streams':'数据流','dev.hr':'心率','dev.peak.sense':'PPG 峰值 (kArb)','dev.peak.h10':'R 波幅值 (mV)',
+    'btn.eda':'连接皮肤电 · 天琴座','btn.gsr':'连接皮肤电 · 串口 GSR',
+    'btn.eda.short':'+ 天琴座皮肤电','btn.gsr.short':'+ 串口 GSR',
+    'gsr.opts':'串口 GSR 参数','gsr.baud':'波特率','gsr.bits':'ADC 满量程',
+    'gsr.pol':'极性（µS 随 ADC 往哪走）','gsr.pol.up':'ADC↑ = 电导↑（实测你这块是这个）','gsr.pol.down':'ADC↑ = 电导↓（Grove 原式）',
+    'dev.bat':'电量','dev.eda.read':'电导 / 质量','dev.gsr.read':'电导 / 原始值','dev.deint':'去交替（2点平均）','dev.nyq':'Nyquist 16 频点 · 接触自检','dev.drops':'掉线',
+    'dev.samples':'样本','dev.rate':'实测率','dev.gain':'纵轴增益','dev.live':'采集中',
+    'confirm.clear':'确定清空内存里已采集的全部数据？这一步不可撤销，已经落盘的文件不受影响。',
+    'sync.th.dev':'设备 / 流','sync.th.skew':'skew','sync.th.jm':'抖动中位','sync.th.j95':'抖动 p95'
+  },
+  en:{
+    'app.name':'Polar Console','theme.light':'Light','theme.dark':'Dark',
+    'state.idle':'Idle','state.armed':'Ready','state.rec':'Recording','state.done':'Stopped',
+    'st.elapsed':'Elapsed','st.devices':'Devices','st.samples':'Samples','st.files':'Files written',
+    'st.notarget':'No output location','st.folder':'Output folder','st.download':'Browser downloads',
+    'warn.plotly':'Plotting library failed to load (offline?). Recording and file writing are unaffected — you just get no live traces.',
+    'empty.title':'No sensor connected',
+    'empty.sub':'This page talks to Polar H10 / Verity Sense and the Lyra EDA sensor over Web Bluetooth, and to a serial GSR board over Web Serial — nothing to install. Use Chrome or Edge.',
+    'empty.s1':'Pick an output folder under Output first — without it data lives only in memory',
+    'empty.s2':'Click the button above and pick your device; click again for each extra device',
+    'empty.s3':'Tick the streams you need, then hit Start recording',
+    'btn.connect':'Connect a sensor','btn.addDevice':'+ Connect another sensor',
+    'btn.start':'Start recording','btn.stop':'Stop recording',
+    'sec.control':'Recording','sec.output':'Output','sec.markers':'Event markers','sec.sync':'Clock sync','sec.mklog':'Marker log',
+    'ctl.hint.nodev':'Connect at least one sensor first.',
+    'ctl.hint.nostream':'Tick at least one stream.',
+    'ctl.hint.nofolder':'No output folder yet — you can record, but data stays in memory.',
+    'ctl.hint.ready':'Ready. Keep this tab in the foreground while recording.',
+    'ctl.hint.rec':'Recording. Switching away throttles autosave to once a minute or worse.',
+    'btn.pickFolder':'Choose output folder','btn.exportNow':'Export buffer','btn.clear':'Clear buffer',
+    'out.note':'Writes new data into that folder every 60 s, plus one merged FULL file when you stop. Without a folder it falls back to browser downloads.',
+    'mk.ph':'Marker label, e.g. "start"','btn.mkAdd':'Add','mk.empty':'No marker buttons yet',
+    'btn.mkSave':'Save set','btn.mkLoad':'Load','btn.mkClear':'Clear',
+    'sync.hint':'live','sync.note':'The two jitter columns are relative to the smallest arrival delta in the window — independent of whether the sensor clock was ever set, so they compare directly across devices.',
+    'sync.empty':'Appears once recording starts.',
+    'mklog.time':'Time','mklog.unix':'UNIX','mklog.rel':'Rel. s','mklog.name':'Marker',
+    'dev.streams':'Streams','dev.hr':'Heart rate','dev.peak.sense':'PPG peak (kArb)','dev.peak.h10':'R wave (mV)',
+    'btn.eda':'Connect EDA · Lyra','btn.gsr':'Connect EDA · serial GSR',
+    'btn.eda.short':'+ Lyra EDA','btn.gsr.short':'+ serial GSR',
+    'gsr.opts':'Serial GSR options','gsr.baud':'Baud rate','gsr.bits':'ADC full scale',
+    'gsr.pol':'Polarity','gsr.pol.up':'ADC↑ = conductance↑ (measured, your module)','gsr.pol.down':'ADC↑ = conductance↓ (stock Grove)',
+    'dev.bat':'Battery','dev.eda.read':'Conductance / quality','dev.gsr.read':'Conductance / raw','dev.deint':'De-alternate (2-pt mean)','dev.nyq':'Nyquist 16 freqs · contact check','dev.drops':'drops',
+    'dev.samples':'Samples','dev.rate':'Actual rate','dev.gain':'Y gain','dev.live':'live',
+    'confirm.clear':'Discard every sample collected in memory? This cannot be undone. Files already written to disk are unaffected.',
+    'sync.th.dev':'Device / stream','sync.th.skew':'skew','sync.th.jm':'jitter med','sync.th.j95':'jitter p95'
+  }
+};
+
+let lang = (navigator.language||'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+const t = k => (I18N[lang] && I18N[lang][k]) || I18N.en[k] || k;
+
+function applyI18n(){
+  document.documentElement.lang = (lang==='zh') ? 'zh-CN' : 'en';
+  document.querySelectorAll('[data-i18n]').forEach(el=>{ el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el=>{ el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll('[data-i18n-attr]').forEach(el=>{
+    const [attr,key] = el.dataset.i18nAttr.split('|'); el.setAttribute(attr, t(key));
+  });
+  document.getElementById('lgZh').setAttribute('aria-pressed', lang==='zh');
+  document.getElementById('lgEn').setAttribute('aria-pressed', lang==='en');
+  rebuildAllCards(); renderSyncPanel(); updateStatus();
+}
+
+/* ---------- theme ---------- */
+let theme = null;
+function setTheme(x){
+  theme = x; document.documentElement.setAttribute('data-theme', x);
+  document.getElementById('thLight').setAttribute('aria-pressed', x==='light');
+  document.getElementById('thDark').setAttribute('aria-pressed', x==='dark');
+}
+
+/* ---------- 流选择状态（与录制解耦） ---------- */
+const sel = {};                       // sel[deviceName][streamName] = bool
+function ensureSel(name, devicetype){
+  if(sel[name]) return sel[name];
+  sel[name] = {};
+  (devices[devicetype]?.output || []).forEach(s=>{ sel[name][s] = true; });
+  return sel[name];
+}
+function onStreamToggle(name, devicetype, streamName){
+  const box = document.getElementById(name+streamName);
+  ensureSel(name, devicetype)[streamName] = box.checked;
+  // 录制过程中改勾选 = 立即开/关那一路
+  if (recordingActive) connectStream(name, devicetype, streamName);
+  updateStatus();
+}
+
+/* ---------- 录制主控 ---------- */
+let recStart = null;
+let fileCount = 0;
+
+async function toggleRecord(){
+  const btn = document.getElementById('btnRec');
+  btn.disabled = true;
+  try{
+    if (!recordingActive){
+      for (const name in obj){
+        const s = sel[name] || {};
+        for (const streamName of Object.keys(s)){
+          if (!s[streamName]) continue;
+          await ActivateStream(name, streams[streamName]);
+          await sleep(120);
+        }
+      }
+      recStart = Date.now();
+    } else {
+      for (const name in obj){
+        const s = sel[name] || {};
+        for (const streamName of Object.keys(s).reverse()){
+          if (!s[streamName]) continue;
+          await streamOff(name, streams[streamName]);
+        }
+      }
+      // streamOff 会把复选框清掉，这里按选择状态还原，方便直接再录一次
+      for (const name in sel)
+        for (const streamName in sel[name]){
+          const b = document.getElementById(name+streamName);
+          if (b) b.checked = sel[name][streamName];
+        }
+    }
+  }catch(e){ console.error('toggleRecord', e); alert('Stream control failed: '+e.message); }
+  btn.disabled = false;
+  updateStatus();
+}
+
+function confirmClear(){ if (confirm(t('confirm.clear'))) { emptybuffer(); rebuildAllCards(); updateStatus(); } }
+
+/* ---------- 设备卡片 ---------- */
+function cardHtml(name, devicetype){
+  const outs = devices[devicetype]?.output || [];
+  const s = ensureSel(name, devicetype);
+  const rows = outs.map(v=>{
+    const hz = RATE[v] ? ` <span style="color:var(--muted)">${RATE[v]} Hz</span>` : '';
+    return `<label><input type="checkbox" id="${name}${v}" ${s[v]?'checked':''}
+      onclick="UI.onStreamToggle('${name}','${devicetype}','${v}')">${v}${hz}</label>`;
+  }).join('');
+  const READ = { Sense:['dev.hr','dev.peak.sense'], H10:['dev.hr','dev.peak.h10'],
+                 LyraEDA:['dev.bat','dev.eda.read'], GSR:['dev.streams','dev.gsr.read'] };
+  const [topKey, peakKey] = READ[devicetype] || ['dev.hr','dev.peak.h10'];
+  const peakLabel = t(peakKey);
+  const topLabel  = t(topKey);
+  return `<article class="dev" id="card_${cssId(name)}">
+    <div class="dev-head">
+      <span class="dev-name" id="${name}">${name}</span>
+      <span class="badge">${devicetype}</span>
+      <span class="badge on hidden" id="live_${cssId(name)}">● ${t('dev.live')}</span>
+      <span class="grow"></span>
+      <span class="dev-stats">
+        <span>${t('dev.samples')} <b id="n_${cssId(name)}">0</b></span>
+        <span>${t('dev.rate')} <b id="r_${cssId(name)}">—</b></span>
+        <span>${t('dev.drops')} <b id="d_${cssId(name)}">0</b></span>
+      </span>
+    </div>
+    <div class="dev-body">
+      <div class="dev-plot">
+        <span id="graph${name}"></span>
+        ${devicetype==='LyraEDA' ? `<div style="margin-top:6px;border-top:1px solid var(--rule-soft);padding-top:6px">
+          <span class="lab" style="font-family:var(--f-mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)">${t('dev.nyq')}</span>
+          <canvas id="nyq${name}" style="width:100%;height:150px;display:block"></canvas>
+        </div>` : ''}
+      </div>
+      <div class="dev-side">
+        <div>
+          <span class="lab" style="font-family:var(--f-mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)">${t('dev.streams')}</span>
+          <div class="streams" style="margin-top:6px">${rows}</div>
+        </div>
+        <div class="readout">
+          ${topLabel} <b id="bpm${name}">—</b><br>
+          ${peakLabel} <span id="size${name}">—</span>
+        </div>
+        ${devicetype==='LyraEDA' ? `<label style="display:flex;align-items:center;gap:7px;font-family:var(--f-mono);font-size:11.5px;cursor:pointer">
+          <input type="checkbox" id="deint${name}" checked onclick="EDA.setDeint('${name}',this.checked)" style="accent-color:var(--accent);width:14px;height:14px">
+          ${t('dev.deint')}</label>` : ''}
+        <div class="gain">
+          <span class="lb">${t('dev.gain')}</span>
+          <button class="btn sm" onclick="alterGain('${name}',0.8)">+</button>
+          <button class="btn sm" onclick="alterGain('${name}',1.2)">−</button>
+        </div>
+      </div>
+    </div>
+  </article>`;
+}
+const cssId = s => s.replace(/[^A-Za-z0-9_-]/g,'_');
+
+/* 引擎在设备连上时调用（替换原 serviceButtons） */
+function buildDeviceCard(name, devicetype){
+  ensureSel(name, devicetype);
+  document.getElementById('emptyState').classList.add('hidden');
+  document.getElementById('deviceList').insertAdjacentHTML('beforeend', cardHtml(name, devicetype));
+  updateStatus();
+}
+function removeDeviceCard(name){
+  const card = document.getElementById('card_'+cssId(name));
+  if(card) card.remove();
+  delete sel[name];
+  if(!document.querySelector('#deviceList .dev')) document.getElementById('emptyState').classList.remove('hidden');
+}
+function rebuildAllCards(){
+  const list = document.getElementById('deviceList');
+  if(!list) return;
+  const names = Object.keys(obj);
+  if(!names.length){ list.innerHTML=''; document.getElementById('emptyState').classList.remove('hidden'); return; }
+  document.getElementById('emptyState').classList.add('hidden');
+  list.innerHTML = names.map(n=>cardHtml(n, obj[n].type || (n.split(' ')[1]))).join('');
+  names.forEach(n=>{ if(traces[n]) updatecombined[n]=true; });
+}
+
+/* ---------- 同步表格（替换原 renderSyncPanel 的文本输出） ---------- */
+function syncTable(){
+  const el = document.getElementById('syncPanel');
+  if(!el) return;
+  const rows=[];
+  for(const dev in syncStore) for(const stream in syncStore[dev]){
+    const S = syncStore[dev][stream];
+    if(!S.stats) continue;
+    const jm = S.stats.median - S.stats.min, j95 = S.stats.p95 - S.stats.min;
+    const cls = v => v<60?'good' : v<150?'warn' : 'bad';
+    rows.push(`<tr><td>${dev.replace(/^Polar /,'')}<span style="color:var(--muted)"> · ${stream}</span></td>
+      <td>${S.est?S.est.skew.toFixed(7):'—'}</td>
+      <td class="${cls(jm)}">${jm.toFixed(1)}</td>
+      <td class="${cls(j95)}">${j95.toFixed(1)}</td></tr>`);
+  }
+  el.innerHTML = rows.length
+    ? `<table class="data"><thead><tr><th>${t('sync.th.dev')}</th><th>${t('sync.th.skew')}</th>
+       <th>${t('sync.th.jm')}</th><th>${t('sync.th.j95')}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    : `<div class="tbl-empty">${t('sync.empty')}</div>`;
+}
+
+/* ---------- 状态栏 ---------- */
+function totalSamples(){
+  let n=0;
+  for(const d in dataobject) for(const k in dataobject[d]){
+    const x=dataobject[d][k]?.x; if(Array.isArray(x)) n+=x.length;
+  }
+  return n;
+}
+function fmtDur(ms){
+  if(ms==null) return '--:--';
+  const s=Math.floor(ms/1000); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+}
+function updateStatus(){
+  const devs = Object.keys(obj);
+  const box = document.getElementById('stateBox'), txt = document.getElementById('stateTxt');
+  let st = 'idle';
+  if (recordingActive) st='rec';
+  else if (recStart) st='done';
+  else if (devs.length) st='armed';
+  box.className = 'state '+(st==='idle'?'':st);
+  txt.textContent = t('state.'+st);
+
+  document.getElementById('stElapsed').textContent = recordingActive ? fmtDur(Date.now()-recStart) : fmtDur(recStart?0:null);
+  document.getElementById('stDevices').textContent = devs.length;
+  document.getElementById('stSamples').textContent = totalSamples().toLocaleString();
+  document.getElementById('stFiles').textContent = fileCount;
+
+  const tg = document.getElementById('stTarget');
+  tg.textContent = autoSave.dirHandle ? (t('st.folder')+' · '+(autoSave.dirHandle.name||'')) :
+                   (autoSave.running ? t('st.download') : t('st.notarget'));
+  document.getElementById('outMode').textContent = autoSave.running ? '● '+ (autoSave.dirHandle?t('st.folder'):t('st.download')) : '—';
+
+  const btn = document.getElementById('btnRec');
+  btn.textContent = recordingActive ? t('btn.stop') : t('btn.start');
+  btn.classList.toggle('rec', !recordingActive);
+  btn.classList.toggle('primary', recordingActive);
+  const anySel = devs.some(n => Object.values(sel[n]||{}).some(Boolean));
+  btn.disabled = !devs.length || !anySel;
+
+  let hint = 'ctl.hint.ready';
+  if(!devs.length) hint='ctl.hint.nodev';
+  else if(!anySel) hint='ctl.hint.nostream';
+  else if(recordingActive) hint='ctl.hint.rec';
+  else if(!autoSave.running) hint='ctl.hint.nofolder';
+  document.getElementById('ctlHint').textContent = t(hint);
+
+  devs.forEach(n=>{
+    const live=document.getElementById('live_'+cssId(n)); if(live) live.classList.toggle('hidden', !recordingActive);
+    const card=document.getElementById('card_'+cssId(n)); if(card) card.classList.toggle('live', recordingActive);
+    const nEl=document.getElementById('n_'+cssId(n)), rEl=document.getElementById('r_'+cssId(n));
+    if(nEl||rEl){
+      let cnt=0, best=null;
+      for(const k in (dataobject[n]||{})){
+        const x=dataobject[n][k]?.x; if(!Array.isArray(x)||x.length<2) continue;
+        cnt+=x.length;
+        if(!best || x.length>best.length) best=x;
+      }
+      if(nEl) nEl.textContent=cnt.toLocaleString();
+      const dEl=document.getElementById('d_'+cssId(n));
+      if(dEl){
+        const k=(window.dropLog||[]).filter(x=>x.dev===n && x.ev==='disconnect').length;
+        dEl.textContent=k; dEl.style.color = k? 'var(--rec)' : '';
+      }
+      if(rEl) rEl.textContent = best ? (best.length/((best[best.length-1]-best[0])/1000)).toFixed(1)+' Hz' : '—';
+    }
+    // 让波形图宽度跟着卡片走（引擎里 layoutCombined 的 width 是写死的 400）
+    const plot = document.querySelector('#card_'+cssId(n)+' .dev-plot');
+    if(plot && layoutCombined[n]){
+      const w = Math.max(300, plot.clientWidth - 10);
+      if(Math.abs((layoutCombined[n].width||0) - w) > 8){ layoutCombined[n].width = w; updatecombined[n] = true; }
+    }
+  });
+}
+
+/* ---------- 落盘文件计数（不改引擎：包一层） ---------- */
+function wrapAutosaveCounter(){
+  const orig = window.onAutoSaveTick;
+  if (typeof orig !== 'function') return;
+  window.onAutoSaveTick = async function(force){
+    const snap = {}; EXPORT_GROUPS.forEach(g=>snap[g.key]=JSON.stringify(autoSave.lastRowIdxByDevByKey[g.key]||{}));
+    await orig.call(this, force);
+    EXPORT_GROUPS.forEach(g=>{
+      if (JSON.stringify(autoSave.lastRowIdxByDevByKey[g.key]||{}) !== snap[g.key]) fileCount++;
+    });
+    updateStatus();
+  };
+}
+
+/* ---------- boot ---------- */
+function boot(){
+  setTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  applyI18n();
+  wrapAutosaveCounter();
+  if (typeof Plotly === 'undefined') document.getElementById('plotlyBanner').classList.add('show');
+  setInterval(updateStatus, 500);
+}
+
+return { setLang(x){ lang=x; applyI18n(); }, setTheme, toggleRecord, confirmClear,
+         onStreamToggle, buildDeviceCard, removeDeviceCard, rebuildAllCards, syncTable, updateStatus, boot,
+         t, get fileCount(){return fileCount;}, set fileCount(v){fileCount=v;} };
+})();
+
+</script>
+
+<script>
+  document.getElementById('selectedfile').addEventListener('change', function(){
+    var file = document.getElementById("selectedfile").files[0];
+    if(!file) return;
+    let reader = new FileReader();
+    reader.readAsText(file);
+    reader.onload = function (event) { document.getElementById("Markers").innerHTML = event.target.result; };
+  });
+  setInterval(updateGraphs, 200);
+  window.addEventListener('beforeunload', function(){
+    if (autoSave.running) flushAutosaveNow({ alsoSaveFull: true });
+    try{ GSR.disconnectAll(); }catch(e){}
+  });
+  UI.boot();
+</script>
+</body>
+</html>
