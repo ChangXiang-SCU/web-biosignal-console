@@ -12,7 +12,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 
 | **通道** | **设备**                    | **测量量**             | **实测采样率** | **传输**          |
 |----------|-----------------------------|------------------------|----------------|-------------------|
-| ECG      | Polar H10 胸带              | 单导联心电（原始 ADC） | 129.4–129.9 Hz | BLE / Polar PMD   |
+| ECG      | Polar H10 胸带              | 单导联心电（µV）       | 129.4–129.9 Hz | BLE / Polar PMD   |
 | ACC      | Polar H10 胸带              | 三轴加速度             | 约 202.6 Hz    | BLE / Polar PMD   |
 | EDA      | 天琴座 Lyra（Nervous EDA）  | 16 频点复阻抗谱        | 8.001 Hz       | BLE / Nordic UART |
 | GSR      | Arduino UNO + 模拟 GSR 模块 | 单点皮肤电导（未校准） | 10.00 Hz       | USB 串口 / CH340  |
@@ -23,7 +23,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 
 2.1 原理
 
-胸带上两个干电极贴在胸前，测量心脏去极化在体表产生的电位差，即单导联心电图。数据经 Polar 私有的 PMD（Polar Measurement Data）BLE 服务传出，是未滤波的原始 ADC 值，不是毫伏。
+胸带上两个干电极贴在胸前，测量心脏去极化在体表产生的电位差，即单导联心电图。数据经 Polar 私有的 PMD（Polar Measurement Data）BLE 服务传出，是未滤波的单导联电压，单位 µV（Polar Measurement Data Specification：ECG 帧类型 0，3 字节/样本，单位 µV）。
 
 2.2 实测参数
 
@@ -33,7 +33,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 | 实测采样率 | 129.42–129.87 Hz                     | 由包间隔与包内样本数反算       |
 | 每包样本数 | 73                                   | ECG 流                         |
 | 分辨率     | 14 bit，3 字节/样本，小端有符号      |                                |
-| 单位       | 原始 ADC 计数（非 mV）               | Polar 未公开换算系数           |
+| 单位       | µV                                   | Polar PMD 规范给出             |
 | 服务 UUID  | fb005c80-02e7-f387-1cad-8acd2d8df0c8 | PMD Service                    |
 | R 波检出   | 平均 +3 SD 阈值 + 300 ms 不应期      | 本文分析脚本所用，非采集端处理 |
 
@@ -194,7 +194,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 | 设备时钟频率偏差（skew） | 约 1e−4 量级                             | SYNC 表给出 skew，可做线性校正      |
 | 串口积压                 | 曾达 19 s（已修复）                      | 已在采集端消除                      |
 
-> *每份 CSV 顶部都写有 SYNC summary（每台设备每条流的 offset、skew、延迟中位数、抖动）与 SYNC per-packet（逐包到达差）。做严格的跨模态时序分析（例如 SCR 与 R 波的时间关系）时应使用这些参数做二次校正，而不是只用 unix_host_ms。*
+> *每份 CSV 顶部都写有 SYNC summary（每台设备每条流的 offset、skew、延迟中位数、抖动；只基于最近 300 包）；Polar_auto_\* 增量文件和手动导出的 RAW 文件另有 SYNC per-packet（逐包到达差，每个分组文件只带自己那一路），全部 auto 文件拼起来就是全程逐包记录，要全程拟合 skew 用它。做严格的跨模态时序分析（例如 SCR 与 R 波的时间关系）时应使用这些参数做二次校正，而不是只用 unix_host_ms。*
 
 六、信号处理链与 CSV 字段字典
 
@@ -246,12 +246,14 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 | \_EDAZ   | Z12_re, Z12_im … Z724_re, Z724_im | 16 个频点的复阻抗原始值，共 32 列，单位 Ω |
 | \_GSR    | GSR_raw                           | 原始 ADC（0–1023），最可靠，优先用这一列  |
 | \_GSR    | GSR_uS / GSR_ohm                  | 按所选极性换算，未校准，仅作相对指标      |
-| \_ECG    | ECG                               | Polar 原始 ADC 计数，非 mV                |
-| \_ACC    | acc_x/y/z/acc_v                   | 三轴加速度与合向量                        |
+| \_ECG    | ECG                               | µV（Polar PMD 规范），未滤波              |
+| \_ACC    | acc_x/y/z/acc_v                   | 三轴加速度与合向量 √(x²+y²+z²)。H10 单位 mG；Verity Sense 是压缩帧原始计数，未乘换算系数 |
 
 文件头部
 
 - MARKERS 段：实验事件标记，用 unix_host_ms 同一根时间轴，可直接与数据行对齐
+
+- LINK EVENTS 段：掉线、重连、丢包缺口（gap）、串口重锚（reanchor）、Polar 启停应答（pmd-start/pmd-stop），数据缺口可追溯
 
 - SYNC summary 段：每台设备每条流的 offset、skew、延迟中位数、抖动中位数与 p95
 
@@ -298,7 +300,7 @@ Arduino GSR 与由 ECG 独立算出的心率在 30 秒尺度上相关 r = +0.674
 
 - Grove 换算式的极性在本模块上与常见文献相反，系由实验数据判定，非厂商说明。
 
-- Polar H10 输出为原始 ADC 计数，非 mV，不能与以 mV 报告的心电幅度直接比较。
+- Polar H10 输出单位为 µV（按 Polar PMD 规范），信号未滤波；干电极胸带的幅度与临床湿电极导联不可直接比较。
 
 - 天琴座存在设备固有的两相交织伪迹，已用长度 2 滑动平均处理，须在方法中报告。
 
@@ -316,7 +318,7 @@ Arduino GSR 与由 ECG 独立算出的心率在 30 秒尺度上相关 r = +0.674
 
 中文
 
-> 心电信号由 Polar H10 胸带采集（实测 129.4–129.9 Hz，原始 ADC 计数），
+> 心电信号由 Polar H10 胸带采集（实测 129.4–129.9 Hz，单位 µV），
 >
 > 经 Polar PMD 蓝牙服务传输。皮肤电活动由 \[设备\] 采集，
 >
@@ -338,7 +340,7 @@ English
 
 > ECG was recorded with a Polar H10 chest strap (measured sampling
 >
-> rate 129.4-129.9 Hz, raw ADC counts) over the Polar PMD BLE service.
+> rate 129.4-129.9 Hz, in µV) over the Polar PMD BLE service.
 >
 > Electrodermal activity was recorded with \[device\] at \[site\], \[rate\] Hz.
 >

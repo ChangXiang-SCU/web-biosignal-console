@@ -1,28 +1,43 @@
 # Web Biosignal Console
 
-A **single HTML file** that records ECG, skin conductance (EDA/GSR) and accelerometry
-simultaneously in the browser, aligns every stream to one clock, and writes CSV to disk.
-No install, no drivers, no Python runtime. Open it in Chrome and go.
+A **single HTML file** that records ECG, accelerometry, PPG and skin conductance (EDA/GSR)
+simultaneously in the browser, aligns every stream to one host clock, and writes CSV to disk.
+No install, no drivers, no Python runtime. Double-click it in Chrome or Edge and go.
 
 单文件网页多模态生理信号同步采集台。心电 + 皮肤电 + 加速度，共用一根时间轴，直接落盘 CSV。
-不需要安装任何软件、驱动或 Python 环境。
+不需要安装任何软件、驱动或 Python 环境，用 Chrome / Edge 双击打开即可。
 
 ---
 
 ## Supported devices
 
-| Channel | Device | Transport | Measured rate |
-|---|---|---|---|
-| ECG | Polar H10 chest strap | Web Bluetooth (Polar PMD) | 129.4–129.9 Hz |
-| ACC | Polar H10 / Verity Sense | Web Bluetooth (Polar PMD) | ~202.6 Hz / 416 Hz |
-| PPG | Polar Verity Sense | Web Bluetooth (Polar PMD) | 176 Hz |
-| EDA | Lyra / **Nervous EDA** (16-frequency impedance spectroscopy) | Web Bluetooth (Nordic UART) | 8.001 Hz |
-| GSR | Arduino + analog GSR module | Web Serial (CH340) | 10.00 Hz |
+| Device | Streams (CSV group) | Transport | Nominal rate | Measured on our units | Unit in CSV |
+|---|---|---|---|---|---|
+| Polar H10 chest strap | ECG (`_ECG`) | Web Bluetooth, Polar PMD | 130 Hz | 129.4–129.9 Hz | µV |
+| Polar H10 chest strap | ACC (`_ACC`) | Web Bluetooth, Polar PMD | 200 Hz, ±4 g, 16 bit | ~202.6 Hz | mG |
+| Polar Verity Sense | PPG (`_PPG`) | Web Bluetooth, Polar PMD | 176 Hz | not re-measured | raw counts |
+| Polar Verity Sense | ACC (`_ACC`) | Web Bluetooth, Polar PMD | 416 Hz | not re-measured | raw counts, see limitations |
+| Lyra / **Nervous EDA** (16-frequency impedance spectroscopy) | EDA (`_EDA`), spectrum (`_EDAZ`) | Web Bluetooth, Nordic UART | 8 Hz | 8.001 Hz | µS / Ω |
+| Arduino Uno/Nano + analog GSR module | GSR (`_GSR`) | Web Serial (CH340) | 10 Hz | 10.00 Hz | ADC counts / µS (uncalibrated) |
 
-Every rate above was **measured on real hardware**, not copied from a datasheet.
+Measured rates come from real hardware; nominal ones are what the console requests.
+Other Polar models (OH1, H9, …) are rejected with a message rather than half-connected.
 
-Multiple devices of the same type can be connected at once — each gets its own card and its own
+Multiple devices of the same type can be connected at once: each gets its own card and its own
 labelled column block in the CSV.
+
+## Browser support
+
+| Browser | Bluetooth sensors | Serial GSR | Write to a folder | Notes |
+|---|---|---|---|---|
+| Chrome / Edge, Windows 10+ and macOS | yes | yes | yes | the target platform |
+| Chrome / Edge, Linux | usually | yes | yes | Web Bluetooth may need `chrome://flags/#enable-experimental-web-platform-features` |
+| Chrome, Android | untested | untested | no (falls back to downloads) | |
+| Firefox, Safari, any browser on iOS | no | no | no | the page says so in a banner and on every connect button |
+
+The page checks for Web Bluetooth, Web Serial and the File System Access API at load time and
+shows a banner listing what is missing. It also reports when the browser sees no usable Bluetooth
+adapter. Opening the file directly (`file://`) works; Chrome treats it as a secure context.
 
 ---
 
@@ -42,14 +57,28 @@ audited or refined offline.
 
 ## Quick start
 
-1. Open `polarconsole_eda.html` in **Chrome or Edge** (Safari and Firefox lack Web Bluetooth / Web Serial)
-2. Pick an output folder under **Output** — without one, data lives only in memory
-3. Connect the sensors you want, tick the streams, hit **Start recording**
-4. Add event markers from the panel on the right; they land in the CSV on the same time axis
+1. Open `polarconsole_eda.html` in Chrome or Edge (double-click is fine, no server needed).
+2. Under **Output**, click **Choose output folder**. Without one, data stays in memory and is only
+   written as browser downloads when you stop.
+3. Connect sensors: **Connect a sensor** for Polar (pick it in Chrome's Bluetooth chooser; click
+   again for each extra device), **Lyra EDA** for the impedance sensor, **serial GSR** for the
+   Arduino (pick its COM port). Each device gets a card.
+4. Tick the streams you want on each card. ACC is the heaviest BLE stream; switch it off if you
+   do not need it.
+5. Click **Start recording**. Keep the tab in the foreground: background tabs are throttled,
+   which can drop BLE links and delay autosave.
+6. Type a label under **Event markers**, click **Add** to make a button, and click that button
+   when the event happens. Markers go into every CSV on the same time axis.
+7. Click **Stop recording**. The console writes the last incremental chunk and one merged FULL
+   file per stream group.
 
-Full walkthrough: [`docs/usage-guide.md`](docs/usage-guide.md)（使用说明）
+If a Bluetooth device drops out mid-recording the card shows "reconnecting", the console retries
+up to 20 times with back-off (about 1.5 minutes in total), restarts the streams that were
+running and keeps writing into the same buffer. The gap and the reconnect are logged in the CSV.
 
-### Arduino GSR
+Full walkthrough in Chinese: [`docs/usage-guide.md`](docs/usage-guide.md)（使用说明）
+
+### Arduino GSR wiring
 
 ```
 GND → GND      5V → 5V      OUT → A0
@@ -67,31 +96,145 @@ real responses.
 
 ---
 
-## Output
+## Output files
 
-CSV per stream group, written incrementally every 60 s (`Polar_auto_*`) plus one merged file on
-stop (`Polar_full_*`). Each file carries three header sections before the data table:
+| File | Written | Content |
+|---|---|---|
+| `Polar_auto_<time>_<GROUP>.csv` | every 60 s while recording, to the chosen folder | only the rows that arrived since the previous chunk; chunks do not overlap |
+| `Polar_full_<start>__to__<end>_<GROUP>.csv` | once, on stop | every row of the session; **use this for analysis** |
+| `Polar data <time>_AUTO_…` / `_FULL_…` | same, when no folder was chosen | browser downloads instead of folder writes |
+| `Polar data <time>_RAW_<GROUP>.csv` | when you click **Export buffer** | everything in memory, with the full per-packet SYNC log |
 
-- **MARKERS** — event marks on the shared time axis
-- **LINK EVENTS** — Bluetooth disconnects and reconnects, so data gaps are traceable
-- **SYNC** — per-device clock offset, skew, transport latency and jitter
+`<GROUP>` is one of `ECG`, `ACC`, `PPG`, `EDA`, `EDAZ`, `GSR`. A file is only written for groups
+that have data.
 
-Three time columns: `unix_host_ms` (**use this** for cross-device analysis), `unix_dev_ms`
-(the device's own clock, not comparable across devices), `DevTime_us`.
+### Layout of one file
 
-### Analysis
+Each file is a stack of sections separated by blank lines. The number of lines before the data
+table varies (it depends on how many markers, link events and packets there were), so **do not
+use a fixed `skiprows`**; find the line that starts with `DevTime_us`.
+
+1. **`MARKERS`** `unix_host_ms,iso_utc,name`
+2. **`LINK EVENTS`** `unix_host_ms,iso_utc,device,event,detail`
+3. **`SYNC summary`** one line per device and stream (all files)
+4. **`SYNC per-packet`** one line per BLE packet / serial line (AUTO and RAW files, only for the
+   group's own stream; concatenate all AUTO files for the whole session)
+5. one info line per device (`COLUMN BLOCK n: <device>,…,host_offset_ms=…` in FULL files)
+6. the **data table**: header line starting with `DevTime_us`, then rows until the next blank line
+
+In the data table every device has its own block of columns, side by side. In FULL files every
+column name carries an `@<device name>` suffix, so two H10s can be told apart. **Rows of
+different devices on the same line are not simultaneous**: each block has its own time columns,
+and blocks of different lengths are padded with empty cells. Align devices on `unix_host_ms`.
+
+### Reading it in Python
 
 ```python
-import pandas as pd, neurokit2 as nk
-df = pd.read_csv("..._GSR.csv", skiprows=4)
-signals, info = nk.eda_process(df["GSR_uS"].dropna().values, sampling_rate=10)
+import io, pandas as pd
+
+def read_console_csv(path):
+    """Data table of a console CSV (AUTO, FULL or RAW)."""
+    lines = open(path, encoding="utf-8-sig").read().splitlines()
+    a = next(i for i, l in enumerate(lines) if l.startswith("DevTime_us"))
+    b = next((i for i in range(a + 1, len(lines)) if not lines[i]), len(lines))
+    return pd.read_csv(io.StringIO("\n".join(lines[a:b])))
+
+df = read_console_csv("Polar_full_..._GSR.csv")
+dev = next(c for c in df.columns if c.startswith("GSR_uS@")).split("@", 1)[1]
+t_ms, g_uS = df[f"unix_host_ms@{dev}"], df[f"GSR_uS@{dev}"]
 ```
 
-10 Hz is ample for EDA — SCR rise time is 1–3 s and the signal sits below 1 Hz; the widely
-published Empatica E4 records EDA at 4 Hz.
+```python
+import neurokit2 as nk
+signals, info = nk.eda_process(g_uS.dropna().values, sampling_rate=10)
+```
 
-What each channel yields, what every metric means, and a suggested analysis pipeline:
+10 Hz is ample for EDA: SCR rise time is 1–3 s and the signal sits below 1 Hz; the widely
+published Empatica E4 records EDA at 4 Hz. What each channel yields and a suggested pipeline:
 [`docs/analysis-guide.md`](docs/analysis-guide.md)（三个通道能做什么分析）
+
+## CSV field reference
+
+### Time columns (every block)
+
+| Column | Unit | Meaning |
+|---|---|---|
+| `DevTime_us` | µs | device clock, microseconds since 2000-01-01 |
+| `unix_dev_ms` | ms | device clock as UNIX time. Not comparable across devices (our H10 reported 2019) |
+| `unix_host_ms` | ms | **shared host time axis**: `unix_dev_ms + host_offset_ms`. Use this across devices |
+
+For Polar streams, the device timestamp of each BLE packet belongs to its **last** sample; the
+earlier samples are spaced by the measured interval (packet-to-packet device time ÷ samples),
+which tracks the real output rate instead of the nominal one. `host_offset_ms` is fixed at the
+first sample of each device: host arrival time minus device time, so it includes one transport
+latency. For GSR the Arduino `millis()` keeps sample spacing exact and the first line anchors it
+to the host clock.
+
+### Signal columns
+
+| Group | Column | Unit | Meaning |
+|---|---|---|---|
+| `_ECG` | `ECG` | µV | single-lead ECG, unfiltered (Polar PMD spec: frame type 0, 3 bytes per sample) |
+| `_ACC` | `acc_x`, `acc_y`, `acc_z` | mG (H10) | accelerometer axes |
+| `_ACC` | `acc_v` | same as axes | magnitude √(x²+y²+z²); ≈1000 at rest on an H10 |
+| `_PPG` | `PPG0`, `PPG1`, `PPG2`, `ambient` | raw counts | Verity Sense optical channels |
+| `_PPG` | `PPGsum` | raw counts | PPG0+PPG1+PPG2 after a 0.2 s high-pass filter (display signal, not raw) |
+| `_EDA` | `EDA_G` | µS | 12 Hz conductance, 2-point de-interleaved. Main EDA column |
+| `_EDA` | `EDA_G_raw` | µS | 12 Hz conductance before de-interleaving |
+| `_EDA` | `EDA_SCL`, `EDA_SCR` | µS | tonic (exponential smoothing, α = 0.04, τ ≈ 3.1 s) and phasic = G − SCL |
+| `_EDA` | `EDA_SCRpeak` | 0/1 | sample is an SCR peak (≥ 0.02 µS, ≥ 2 s apart) |
+| `_EDA` | `EDA_SCRmin` | count | SCR peaks in the last 60 s |
+| `_EDA` | `EDA_Cx`, `EDA_Cy`, `EDA_Cr` | Ω | centre and radius of the circle fitted to the 16-point Nyquist plot |
+| `_EDA` | `EDA_Cfit` | — | RMS residual to that circle ÷ radius; contact quality, good below 0.10 |
+| `_EDA` | `EDA_SQI` | 0–100 | vendor-style signal quality index |
+| `_EDA` | `EDA_Arousal_vendor` | 0–100 | vendor heuristic, no literature basis; do not publish |
+| `_EDA` | `EDA_bat` | % | battery |
+| `_EDAZ` | `Z12_re`, `Z12_im` … `Z724_re`, `Z724_im` | Ω | raw complex impedance at the 16 frequencies (32 columns) |
+| `_GSR` | `GSR_raw` | ADC counts | Arduino reading (float: 100 ms oversampled mean). Most trustworthy GSR column |
+| `_GSR` | `GSR_uS`, `GSR_ohm` | µS, Ω | Grove formula with the selected polarity; uncalibrated, relative use only |
+
+### `LINK EVENTS` event types
+
+| `event` | Meaning |
+|---|---|
+| `disconnect` | the BLE link dropped |
+| `reconnect` | reconnected; `detail` gives the attempt number, the gap length and the streams restarted |
+| `give-up` | 20 reconnect attempts failed; the device card is removed, data recorded so far is kept |
+| `gap` | a Polar stream skipped samples (`detail`: stream and missing milliseconds, from the device clock) |
+| `clock-backwards` | a Polar packet's device time went backwards; nominal spacing used |
+| `reanchor` | the serial GSR time axis was re-anchored (`reset`: board rebooted; `slow` / `early`: Arduino clock drifted more than 2 s) |
+| `pmd-start`, `pmd-stop` | Polar's answer to a start/stop command, with the raw response bytes (a failed start shows up here) |
+
+### `SYNC summary` columns
+
+`Device, Stream, offset_ms, skew, offset_at_mean_ms, p05_latency_ms, median_latency_ms,
+jitter_median_ms, jitter_p95_ms`: a least-squares fit `host_arrival ≈ offset + skew × unix_dev_ms`
+over the **last 300 packets**, plus the distribution of `host_arrival − unix_dev_ms`. The two
+latency columns are only real latencies when the device clock was set (Lyra, GSR); the jitter
+columns are relative to the smallest difference in the window and compare directly across
+devices. For a whole-session skew fit, use the `SYNC per-packet` lines of the AUTO files.
+
+## Known limitations
+
+- **Clock alignment is first-sample anchored.** `unix_host_ms` carries one transport latency
+  (Lyra measured 221 ms median) and does not correct device clock
+  drift online. At 50 ppm that is 180 ms per hour. Correct linearly with the SYNC fit if you
+  need sub-second cross-device timing.
+- **Verity Sense ACC is in raw counts.** Compressed ACC frames need a per-device scale factor
+  (sent by the sensor in its start-measurement response) to become mG. The console records that
+  response verbatim in `LINK EVENTS` (`pmd-start`) but does not apply it.
+- **Polar reconnect was verified with a simulated device only** (see `tests/`). It follows the
+  existing Lyra reconnect logic, but a real H10 dropout still needs checking.
+- **All data lives in memory** until written. Hours-long recordings at full rate use hundreds of
+  MB. Closing the tab mid-recording may lose the last minute: stop recording first.
+- **Without an output folder** the stop flush downloads both an AUTO chunk and a FULL file per
+  group; the FULL file is the one to keep.
+- **GSR µS values are uncalibrated**, and the Grove formula's polarity was inverted on our module
+  (decided from data, see `docs/technical-reference.md`). Report `GSR_raw` or state the formula.
+- **Arduino clocks drift.** Boards with a ceramic resonator can be off by up to about 0.5 %; every 2 s of
+  accumulated drift the GSR axis is re-anchored (logged as `reanchor`).
+- **The Lyra EDA channel did not pass physiological validation on our unit** (details below).
+- Supported Polar models are H10 and Verity Sense only.
 
 ---
 
@@ -151,6 +294,29 @@ complete and frame parsing is error-free.
 
 ---
 
+## Development and tests
+
+The parsing and timing logic lives in one block of pure functions at the top of the HTML file,
+`<script id="bsc-core">` (`BSCore`): PMD packet decoding, per-packet timestamp reconstruction,
+host-clock anchoring, the sync fit, CSV block assembly, COBS, the protobuf reader, the Nyquist
+circle fit, EDA processing, GSR conversion and the serial clock. The page calls it; the tests
+extract that same block from the HTML and run it in Node, so the file stays a single
+double-clickable page with no build step.
+
+```bash
+node --test
+```
+
+Requires Node 20 or newer (tested on 22), nothing to install. `tests/*.test.mjs` feed synthetic packets built
+by `tests/helpers/pmd-encode.mjs` (ECG, H10 ACC, delta-compressed frames with odd and even bit
+widths, truncated packets, Lyra frames, serial lines with drift, stalls and board resets).
+`tests/page.e2e.test.mjs` opens the real page in Chromium through Playwright when it is
+available (it is skipped otherwise): it checks that the page loads without errors offline, that
+browsers without Web Bluetooth / Web Serial get a clear message, and drives a simulated H10 and
+Arduino (`tests/helpers/fake-devices.js`) through connect, record, dropout, reconnect and stop,
+then checks the resulting CSV files: headers, timestamps, sample values, link events and SYNC
+sections.
+
 ## Repository layout
 
 ```
@@ -159,6 +325,7 @@ firmware/GSR_serial/GSR_serial.ino Arduino sketch
 docs/usage-guide.md                user guide (使用说明)
 docs/technical-reference.md        protocol, measured specs, CSV dictionary, methods templates (技术说明)
 docs/analysis-guide.md             what each channel measures and what you can compute from it (分析指南)
+tests/                             Node tests and Playwright end-to-end test
 ```
 
 ## License
