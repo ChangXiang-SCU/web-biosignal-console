@@ -37,7 +37,7 @@ async function openPage(browser, { locale = 'en-US', init = null, offline = true
 }
 
 function section(csv, startsWith) {
-  const lines = csv.replace(/^﻿/, '').split(/\r?\n/);
+  const lines = (csv.charCodeAt(0) === 0xFEFF ? csv.slice(1) : csv).split(/\r?\n/);
   const i = lines.findIndex(l => l.startsWith(startsWith));
   return i < 0 ? null : lines.slice(i);
 }
