@@ -1203,7 +1203,7 @@ async function onAutoSaveTick(force=false){
       const ts = timestampForFilename();
       const fname = `Polar_auto_${ts}_${g.key}.csv`;
       if (autoSave.dirHandle){
-        const BOM = '﻿';
+        const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
         const h = await autoSave.dirHandle.getFileHandle(fname, { create: true });
         const w = await h.createWritable(); await w.write(BOM + csv); await w.close();
       }else{
@@ -1247,7 +1247,7 @@ function buildDataMatrixOnlyCsv(for_streams, groupKey){
 async function saveFullCsvToFolder(){
   const tsStart = autoSave.sessionStart ? timestampForFilename(autoSave.sessionStart) : 'session';
   const tsEnd = timestampForFilename();
-  const BOM = '﻿';
+  const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
 
   // ★ 同样改为遍历 EXPORT_GROUPS，ECG 的 FULL 文件不会再漏
   for (const g of EXPORT_GROUPS){
@@ -1508,7 +1508,7 @@ function saveCsv(tag, csvString) {
       : new Date().toISOString()) +
     '_' + tag + '.csv';
 
-  const BOM = '﻿';
+  const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
   const blob = new Blob([BOM, csvString], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
 
