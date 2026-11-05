@@ -52,7 +52,7 @@
 | **文件**     | **内容**                                             |
 |--------------|------------------------------------------------------|
 | \*\_GSR.csv  | GSR_raw（原始 ADC）、GSR_uS（电导）、GSR_ohm（电阻） |
-| \*\_ECG.csv  | Polar 心电原始 ADC，130 Hz                           |
+| \*\_ECG.csv  | Polar 心电，µV，130 Hz                               |
 | \*\_ACC.csv  | 三轴加速度，约 200 Hz                                |
 | \*\_EDA.csv  | 天琴座处理后信号（见第六节）                         |
 | \*\_EDAZ.csv | 天琴座 16 频点原始复阻抗，32 列                      |
@@ -79,15 +79,22 @@ CSV 的结构
 
 五、分析入口
 
-CSV 前 4 行是元信息，读的时候跳过即可：
+CSV 顶部元信息段的行数不固定（标记、掉线事件、SYNC 逐包记录有多少就有多少行），不能用固定的 skiprows。先找到以 DevTime_us 开头的那一行，从那里读到下一个空行为止：
 
-> import pandas as pd, neurokit2 as nk
->
-> df = pd.read_csv("...\_GSR.csv", skiprows=4)
->
-> sig = df\["GSR_uS"\].dropna().values
->
-> signals, info = nk.eda_process(sig, sampling_rate=10)
+```python
+import io, pandas as pd, neurokit2 as nk
+
+def read_console_csv(path):
+    lines = open(path, encoding="utf-8-sig").read().splitlines()
+    a = next(i for i, l in enumerate(lines) if l.startswith("DevTime_us"))
+    b = next((i for i in range(a + 1, len(lines)) if not lines[i]), len(lines))
+    return pd.read_csv(io.StringIO("\n".join(lines[a:b])))
+
+df = read_console_csv("Polar_full_..._GSR.csv")
+col = next(c for c in df.columns if c.startswith("GSR_uS"))   # full 文件列名带 @设备名
+sig = df[col].dropna().values
+signals, info = nk.eda_process(sig, sampling_rate=10)
+```
 
 会得到 EDA_Tonic（SCL）、EDA_Phasic（SCR）与 SCR_Peaks。10 Hz 对皮肤电绰绰有余：SCR 上升时间 1 到 3 秒，信号能量在 1 Hz 以下，Empatica E4 只有 4 Hz。
 
@@ -115,7 +122,7 @@ CSV 前 4 行是元信息，读的时候跳过即可：
 | 串口读数在 0 和一两百之间乱跳 | GSR 模块没接到 A0，或指套没戴。悬空引脚在吃工频                                           |
 | 蓝牙搜不到设备                | Chrome 的蓝牙选择器是系统弹窗，需要手动点设备名。另确认设备已开机                         |
 | 录着录着蓝牙断了              | 会自动重连（最多 20 次），缺口记在 LINK EVENTS 段。频繁掉线可关掉 ACC 流，200 Hz 最占空口 |
-| Excel 打开表头很怪            | 前 4 行是元信息段，数据表头在第 5 行                                                      |
+| Excel 打开表头很怪            | 顶部是元信息段，行数不固定；数据表头是以 DevTime_us 开头的那一行                          |
 | 数据只在内存里                | 忘了选输出文件夹。选了才会每 60 秒落盘                                                    |
 
 八、包里有什么

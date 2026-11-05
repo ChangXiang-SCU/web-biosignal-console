@@ -183,6 +183,7 @@ table.data .bad{color:var(--rec)}
 .banner{border-radius:var(--r);padding:10px 13px;font-size:12.5px;margin-bottom:14px;display:none;line-height:1.5}
 .banner.show{display:block}
 .banner.warn{background:var(--warn-soft);color:var(--warn);border:1px solid transparent}
+.banner div+div{margin-top:4px}
 .danger-zone{border-top:1px solid var(--rule-soft);margin-top:12px;padding-top:11px}
 .hidden{display:none !important}
 #Combined{position:absolute;left:-9999px;top:0;height:300px;width:800px;visibility:hidden;pointer-events:none}
@@ -194,7 +195,7 @@ table.data .bad{color:var(--rec)}
   <div class="topbar">
     <div class="brand">
       <h1 data-i18n="app.name">Polar 采集台</h1>
-      <span class="ver">v1.1 · engine 0903 · +EDA</span>
+      <span class="ver">v1.3 · engine 2611 · +EDA</span>
     </div>
     <div class="spacer"></div>
     <div class="seg" role="group" aria-label="Theme">
@@ -229,6 +230,9 @@ table.data .bad{color:var(--rec)}
     </div>
     <div class="cell path grow" id="stTarget" data-i18n="st.notarget">未选输出位置</div>
   </div>
+
+  <!-- 浏览器能力自检：缺 Web Bluetooth / Web Serial / 文件夹写入时在这里说清楚，由 UI.checkCompat 填充 -->
+  <div class="banner warn" id="compatBanner" role="alert"></div>
 
   <div class="banner warn" id="plotlyBanner">
     <span data-i18n="warn.plotly">图形库未能加载（可能离线）。数据采集与落盘不受影响，只是没有实时波形。</span>
@@ -360,6 +364,518 @@ table.data .bad{color:var(--rec)}
   </div>
 </div>
 
+<script id="bsc-core">
+/* =========================================================================
+   BSCore · 纯函数核心（2026-11）
+   PMD 解包 / 时间戳重建 / 时钟拟合 / CSV 拼装 / COBS / protobuf /
+   Nyquist 圆拟合 / EDA 处理 / GSR 换算与串口时钟。
+   这里不碰 window、document，也不读写页面里的全局变量：
+   页面引擎调用它，tests/ 下的 Node 测试把这一段原样抽出来跑。
+   改这里的任何东西，都请先在仓库根目录跑一遍 `node --test`。
+   ========================================================================= */
+var BSCore = (function(){
+'use strict';
+
+const EPOCH_2000_TO_1970 = 946684800000;
+
+/* ---------------- 整数与位流 ---------------- */
+// 把 bits 位无符号数解释成二补码有符号数。注意是 >=：-2^(bits-1) 必须是负数。
+function signExtend(v, bits){
+  if(bits <= 0) return 0;
+  const half = 2 ** (bits - 1);
+  return v >= half ? v - 2 ** bits : v;
+}
+// 小端有符号整数，nBytes ≤ 6
+function readIntLE(u8, off, nBytes){
+  let v = 0;
+  for(let i = 0; i < nBytes; i++) v += u8[off + i] * 2 ** (8 * i);
+  return signExtend(v, 8 * nBytes);
+}
+// 从 bitPos 起按 LSB-first 读 nBits 位（Polar 增量帧的打包方式），返回无符号值
+function readBitsLE(u8, bitPos, nBits){
+  let v = 0;
+  for(let k = 0; k < nBits; k++){
+    const p = bitPos + k;
+    if((u8[p >> 3] >> (p & 7)) & 1) v += 2 ** k;
+  }
+  return v;
+}
+
+/* ---------------- Polar PMD 数据包 ----------------
+   [0]      测量类型 0=ECG 1=PPG 2=ACC
+   [1..8]   uint64 小端，纳秒，自 2000-01-01，代表本包「最后一个」样本的时刻
+   [9]      帧类型；最高位 0x80 = 增量压缩帧
+   [10..]   样本
+   ECG  帧 0：3 字节有符号 / 样本，单位 µV
+   ACC  帧 0/1/2：每轴 1/2/3 字节有符号，三轴交错，单位 mG（H10 用帧 1）
+   PPG  帧 0：4 通道 × 3 字节（ppg0 ppg1 ppg2 ambient）
+   增量帧：先是每通道一个参考样本（refBytes 字节），然后若干块
+           [位宽 1B][样本数 1B][ceil(位宽×样本数×通道数/8) 字节，LSB-first 交错打包]
+           每个增量都是 位宽 位的二补码，位宽可以是奇数。 */
+const PMD_TYPES = { 0:'ECG', 1:'PPG', 2:'ACC' };
+
+function parsePmdHeader(u8){
+  if(!u8 || u8.length < 10) throw new Error('PMD packet too short');
+  let ns = 0n;
+  for(let i = 0; i < 8; i++) ns |= BigInt(u8[1 + i]) << BigInt(8 * i);
+  const frameType = u8[9];
+  return { type: u8[0], ns, devMs: Number(ns) / 1e6, frameType,
+           compressed: (frameType & 0x80) !== 0, baseFrame: frameType & 0x7f };
+}
+
+function readRawFrames(u8, off, channels, bytes){
+  const out = Array.from({ length: channels }, () => []);
+  const step = channels * bytes;
+  const avail = Math.max(0, u8.length - off);
+  const n = Math.floor(avail / step);
+  for(let s = 0; s < n; s++)
+    for(let c = 0; c < channels; c++) out[c].push(readIntLE(u8, off + s * step + c * bytes, bytes));
+  return { channels: out, truncated: avail % step !== 0 };
+}
+
+function decodeDeltaFrames(u8, off, channels, refBytes){
+  const out = Array.from({ length: channels }, () => []);
+  let p = off;
+  if(p + channels * refBytes > u8.length) return { channels: out, truncated: true };
+  for(let c = 0; c < channels; c++){ out[c].push(readIntLE(u8, p, refBytes)); p += refBytes; }
+  let truncated = false;
+  while(p + 2 <= u8.length){
+    const bits = u8[p], count = u8[p + 1];
+    p += 2;
+    const nBytes = Math.ceil(bits * count * channels / 8);
+    if(p + nBytes > u8.length){ truncated = true; break; }
+    let bp = p * 8;
+    for(let s = 0; s < count; s++){
+      for(let c = 0; c < channels; c++){
+        const d = signExtend(readBitsLE(u8, bp, bits), bits);
+        bp += bits;
+        const a = out[c];
+        a.push(a[a.length - 1] + d);
+      }
+    }
+    p += nBytes;
+  }
+  if(p < u8.length) truncated = true;
+  return { channels: out, truncated };
+}
+
+// opt.accRefBytes：压缩 ACC 参考样本字节数（16 bit 分辨率 = 2）
+// 支持的帧类型与官方 SDK（EcgData / PpgData / AccData）一致：ECG 只有未压缩帧 0；PPG 帧 0 和压缩帧 0
+// （4 通道）；ACC 帧 0/1/2 和压缩帧 0/1。其余类型通道数不同，标 supported=false，不乱解。
+function parsePmdPacket(u8, opt){
+  opt = opt || {};
+  const h = parsePmdHeader(u8);
+  let r = { channels: [], truncated: false }, supported = true;
+  if(h.type === 0){
+    if(!h.compressed && h.baseFrame === 0) r = readRawFrames(u8, 10, 1, 3);
+    else supported = false;
+  }else if(h.type === 1){
+    if(h.baseFrame !== 0) supported = false;
+    else if(h.compressed) r = decodeDeltaFrames(u8, 10, 4, 3);
+    else r = readRawFrames(u8, 10, 4, 3);
+  }else if(h.type === 2){
+    if(h.compressed){ if(h.baseFrame <= 1) r = decodeDeltaFrames(u8, 10, 3, opt.accRefBytes || 2); else supported = false; }
+    else if(h.baseFrame <= 2) r = readRawFrames(u8, 10, 3, h.baseFrame + 1);
+    else supported = false;
+  }else supported = false;
+  return Object.assign({}, h, { name: PMD_TYPES[h.type] || null, supported,
+                                channels: r.channels, truncated: r.truncated });
+}
+
+/* ---------------- PMD 控制点应答 ----------------
+   [0]=0xF0 [1]=操作码（2 开始测量 / 3 停止）[2]=测量类型 [3]=状态（0 成功）[4]=more
+   [5..] 设置 TLV：[设置类型 1B][个数 1B][值 × 个数]，值宽度按类型（与官方 SDK PmdSetting 一致）。
+   类型 5 = FACTOR，4 字节小端 IEEE 754 float：压缩帧的原始计数要乘它才是物理单位。 */
+const PMD_SETTING_SIZE = { 0:2, 1:2, 2:2, 3:4, 4:1, 5:4, 6:16, 7:1, 8:1, 9:2, 10:4, 11:4, 12:1 };
+function parsePmdControlResponse(u8){
+  const r = { ok: u8.length >= 4 && u8[0] === 0xF0, opcode: u8[1], type: u8[2], status: u8[3],
+              more: u8.length > 4 ? u8[4] : 0, settings: {}, factor: null };
+  if(!r.ok || u8.length <= 6) return r;
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let p = 5;
+  while(p + 2 <= u8.length){
+    const st = u8[p], count = u8[p + 1], size = PMD_SETTING_SIZE[st];
+    p += 2;
+    if(size == null || p + count * size > u8.length) break;      // 未知类型或截断：后面的不可信，停
+    const vals = [];
+    for(let k = 0; k < count; k++, p += size){
+      vals.push(st === 5 ? dv.getFloat32(p, true) : (size <= 4 ? readIntLE(u8, p, size) : null));
+    }
+    r.settings[st] = vals;
+  }
+  if(r.settings[5] && r.settings[5].length) r.factor = r.settings[5][0];
+  return r;
+}
+/* 按官方 SDK（AccData / PpgData）的规则把压缩帧原始计数换成物理单位，返回新的 channels：
+     ACC 压缩帧 0（0x80，Verity Sense）：trunc(raw × factor × 1000) → mG（这类帧以 g 为单位）
+     ACC 压缩帧 1（0x81）              ：factor ≠ 1 时 trunc(raw × factor)
+     PPG 压缩帧                        ：trunc(raw × factor)
+   未压缩帧（H10 的 ECG、ACC）本来就是 µV / mG，原样返回。factor 未知（null）也原样返回。 */
+function applyPmdFactor(pk, factor){
+  if(factor == null || !pk.compressed) return pk.channels;
+  const f = Math.fround(factor);
+  const mul = (k) => pk.channels.map(ch => ch.map(v => Math.trunc(Math.fround(v * k))));
+  if(pk.type === 2){
+    if(pk.baseFrame === 0) return mul(Math.fround(f * 1000));
+    return f === 1 ? pk.channels : mul(f);
+  }
+  if(pk.type === 1) return mul(f);
+  return pk.channels;
+}
+
+/* ---------------- 包内时间戳重建 ----------------
+   endMs   本包最后一个样本的设备时刻（ms since 2000）
+   prev    上一包返回的 next（首包传 undefined）
+   n       本包样本数
+   nominal 标称采样间隔 ms
+   规则：最后一个样本 = endMs，往前按间隔排。间隔优先用「相邻两包时间戳差 / 样本数」，
+   它落在标称值的 0.5–1.5 倍之内才采信并记住；其余情况：
+     gapMs      间隔偏大：丢包或断流。沿用上一次采信的间隔（没有就用标称值），报告缺口长度
+     irregular  时间往前走了，但不到 n 个样本应占时间的一半：本包按实测间隔压紧排，保证不和上一包重叠，
+                不记住这个间隔
+     backwards  设备时间没往前走（倒退或重复）：drop=true，本包不出样本，next 保持上一包，
+                时间轴始终单调。大幅跳变（设备重启、被对表）由 DeviceClockGuard 先处理掉，到不了这里 */
+function packetSampleTimes(endMs, prev, n, nominal){
+  let step = (prev && prev.step) || nominal, use = step;
+  let gapMs = 0, backwards = false, irregular = false;
+  if(prev && prev.end != null && n > 0){
+    const measured = (endMs - prev.end) / n;
+    if(measured > nominal * 0.5 && measured < nominal * 1.5) step = use = measured;
+    else if(measured >= nominal * 1.5) gapMs = (endMs - prev.end) - n * step;
+    else if(measured <= 0) backwards = true;
+    else { irregular = true; use = measured; }
+  }
+  if(backwards) return { times: [], drop: true, step, gapMs, backwards, irregular, next: prev };
+  const times = new Array(n);
+  for(let i = 0; i < n; i++) times[i] = Math.round((endMs - (n - 1 - i) * use) * 1000) / 1000;
+  return { times, drop: false, step, gapMs, backwards, irregular, next: { end: endMs, step } };
+}
+
+/* ---------------- 设备时钟跳变 ----------------
+   PMD 时间戳来自设备 RTC，而 hostOffset 只在首包锚定一次。设备重启（RTC 回到出厂时刻）或被别的 App
+   对表时，时间戳会整段跳走：往回跳会让时间轴倒退，往前跳会把数据挪到几年以后。
+   DeviceClockGuard 以每包到达主机的时刻为参照，L = 到达时刻 − (设备时刻 + 平移) − 首包偏移：
+     · 设备比主机快出 jumpMs 以上（L < −jumpMs）：往前跳。主机卡顿只会让包迟到，不会让它提前，所以不会误判。
+     · 设备时间比这一路上一包还早，且慢了 jumpMs 以上：往回跳。只是迟到（主机卡顿、BLE 拥塞）时设备时间
+       照样往前走，不会触发。
+   跳变后加一个平移量，让设备时间接着主机时间走。一台设备的各路数据共用一个 guard；跳变那一刻另一路还在
+   路上的旧包，10 s 内用旧平移量还对得上的，照旧用旧的。jumpMs 默认 30 s，远大于 BLE 延迟和几小时的钟漂。 */
+class DeviceClockGuard{
+  constructor(opt){
+    opt = opt || {};
+    this.jumpMs = opt.jumpMs || 30000;
+    this.graceMs = opt.graceMs || 10000;
+    this.base = null; this.shifts = [{ s: 0, since: -Infinity }]; this.lastRaw = {};
+  }
+  map(stream, raw, arrival){
+    const last = this.lastRaw[stream];
+    this.lastRaw[stream] = raw;
+    if(this.base === null){ this.base = arrival - raw; return { devMs: raw, event: null, jumpMs: 0 }; }
+    const L = s => arrival - (raw + s) - this.base;
+    const cur = this.shifts[this.shifts.length - 1];
+    if(Math.abs(L(cur.s)) < this.jumpMs) return { devMs: raw + cur.s, event: null, jumpMs: 0 };
+    if(arrival - cur.since < this.graceMs){
+      for(let i = this.shifts.length - 2; i >= 0; i--)
+        if(Math.abs(L(this.shifts[i].s)) < this.jumpMs) return { devMs: raw + this.shifts[i].s, event: null, jumpMs: 0 };
+    }
+    const ahead = L(cur.s) < -this.jumpMs, behind = last != null && raw <= last && L(cur.s) > this.jumpMs;
+    if(!ahead && !behind) return { devMs: raw + cur.s, event: null, jumpMs: 0 };   // 只是迟到
+    const s = arrival - raw - this.base;
+    this.shifts.push({ s, since: arrival });
+    if(this.shifts.length > 4) this.shifts.shift();
+    return { devMs: raw + s, event: 'jump', jumpMs: cur.s - s };   // 设备钟跳了多少，正 = 往前跳
+  }
+}
+
+/* ---------------- 主机时间轴 ----------------
+   unix_host_ms = dev_ms + EPOCH_2000_TO_1970 + offset
+   offset 由首个样本锚定：offset = 首样本到达主机的时刻 − 首样本的设备 UNIX 时刻 */
+function hostOffset(firstDevMs, firstSysMs){
+  if(firstDevMs == null || firstSysMs == null) return 0;
+  return firstSysMs - (firstDevMs + EPOCH_2000_TO_1970);
+}
+function hostMs(devMs, offset){ return devMs + EPOCH_2000_TO_1970 + (offset || 0); }
+
+/* ---------------- 逐包时钟拟合 ----------------
+   pairs: [[unix_dev_ms, sys_ms], ...]  →  sys ≈ offset + skew × unix_dev_ms（中心化最小二乘）
+   stats 里的 min/median/p95 是 sys−dev 的分布，jitter = median−min / p95−min。 */
+function fitClockPairs(pairs){
+  const n = pairs.length;
+  if(n < 2) return null;
+  let meanX = 0, meanY = 0;
+  for(const [x, y] of pairs){ meanX += x; meanY += y; }
+  meanX /= n; meanY /= n;
+  let varX = 0, covXY = 0;
+  for(const [x, y] of pairs){ const dx = x - meanX, dy = y - meanY; varX += dx * dx; covXY += dx * dy; }
+  let skew = 1, offset = meanY;
+  if(varX !== 0){ skew = covXY / varX; offset = meanY - skew * meanX; }
+  const diffs = pairs.map(([x, y]) => y - x).sort((a, b) => a - b);
+  const stats = {
+    p05: diffs[Math.max(0, Math.floor(n * 0.05) - 1)],
+    median: diffs[Math.floor(n * 0.5)],
+    p95: diffs[Math.min(n - 1, Math.floor(n * 0.95))],
+    min: diffs[0],
+    meanX
+  };
+  return { est: { offset, skew }, stats };
+}
+
+/* ---------------- CSV 数据区 ----------------
+   blocks: [{ dev, x:[dev_ms], cols:{stream:[y]}, start, end, offset }]
+   每台设备一个列块并排；同一行里不同设备的样本「不是」同一时刻，各自看自己块里的时间列。
+   suffixDevice=true 时列名加 @设备名（FULL 文件用，同类多设备可区分）。 */
+function csvDeviceBlocks(blocks, streams, opt){
+  opt = opt || {};
+  const names = ['DevTime_us', 'unix_dev_ms', 'unix_host_ms'].concat(streams);
+  const header = blocks.map(b => names.map(c => opt.suffixDevice ? c + '@' + b.dev : c).join(',')).join(',');
+  const blank = new Array(names.length).fill('').join(',');
+  const rows = [];
+  for(let r = 0; ; r++){
+    let have = false;
+    const pieces = [];
+    for(const b of blocks){
+      const start = b.start || 0;
+      const end = (b.end == null) ? b.x.length : b.end;
+      const idx = start + r;
+      if(idx < end){
+        const x = b.x[idx];
+        const p = [Math.round(x * 1000), (x + EPOCH_2000_TO_1970).toFixed(3), hostMs(x, b.offset).toFixed(3)];
+        for(const s of streams){
+          const y = b.cols && b.cols[s];
+          if(y && idx < y.length){ p.push(y[idx]); have = true; } else p.push('');
+        }
+        pieces.push(p.join(','));
+      }else pieces.push(blank);
+    }
+    if(!have) break;
+    rows.push(pieces.join(','));
+  }
+  return { header, rows };
+}
+
+// CSV 文本格式里一条元信息字段：去掉逗号和换行，免得把列打乱
+function csvField(s){ return String(s == null ? '' : s).replace(/[,\r\n]+/g, ' '); }
+
+/* ---------------- COBS ---------------- */
+function cobsDecode(buf){                       // 入参不含结尾 0x00
+  const out = []; let i = 0;
+  while(i < buf.length){
+    const code = buf[i]; if(code === 0) break;
+    i++;
+    for(let k = 0; k < code - 1 && i < buf.length; k++) out.push(buf[i++]);
+    if(code !== 0xFF && i < buf.length) out.push(0);
+  }
+  return Uint8Array.from(out);
+}
+function cobsEncode(buf){                       // 返回 [code][data...] 0x00
+  const out = [0]; let codeIdx = 0, code = 1;
+  for(let i = 0; i < buf.length; i++){
+    if(buf[i] === 0){ out[codeIdx] = code; codeIdx = out.length; out.push(0); code = 1; }
+    else{
+      out.push(buf[i]); code++;
+      if(code === 0xFF){ out[codeIdx] = code; codeIdx = out.length; out.push(0); code = 1; }
+    }
+  }
+  out[codeIdx] = code;
+  out.push(0);
+  return Uint8Array.from(out);
+}
+
+/* ---------------- 极简 protobuf ----------------
+   EdaBuffer { repeated Impedance data = 1; Timestamp timestamp = 2; }
+   Impedance { float real = 1; float imag = 2; }
+   Timestamp { uint64 time = 1; uint32 us = 2; }                              */
+function pbVarint(u8, p){
+  let v = 0, s = 0, b;
+  do{ if(p.i >= u8.length) throw new Error('varint overrun'); b = u8[p.i++]; v += (b & 0x7f) * Math.pow(2, s); s += 7; }while(b >= 0x80);
+  return v;
+}
+function pbParseEdaBuffer(u8){
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const p = { i: 0 }; const imp = []; let t_s = 0, t_us = 0;
+  while(p.i < u8.length){
+    const key = pbVarint(u8, p), field = key >>> 3, wire = key & 7;
+    if(wire !== 2){ if(wire === 0) pbVarint(u8, p); else if(wire === 5) p.i += 4; else if(wire === 1) p.i += 8; else break; continue; }
+    const len = pbVarint(u8, p), end = p.i + len;
+    if(end > u8.length) throw new Error('length-delimited overrun');
+    if(field === 1){
+      let re = 0, im = 0;
+      while(p.i < end){
+        const k2 = pbVarint(u8, p), f2 = k2 >>> 3, w2 = k2 & 7;
+        if(w2 === 5){ const v = dv.getFloat32(p.i, true); p.i += 4; if(f2 === 1) re = v; else if(f2 === 2) im = v; }
+        else if(w2 === 0) pbVarint(u8, p);
+        else if(w2 === 2){ const l2 = pbVarint(u8, p); p.i += l2; }
+        else break;
+      }
+      imp.push({ re, im });
+    }else if(field === 2){
+      while(p.i < end){
+        const k2 = pbVarint(u8, p), f2 = k2 >>> 3, w2 = k2 & 7;
+        if(w2 === 0){ const v = pbVarint(u8, p); if(f2 === 1) t_s = v; else if(f2 === 2) t_us = v; }
+        else if(w2 === 2){ const l2 = pbVarint(u8, p); p.i += l2; }
+        else if(w2 === 5) p.i += 4; else break;
+      }
+    }
+    p.i = end;
+  }
+  return { imp, t_s, t_us };
+}
+function pbEncodeTimestamp(sec, us){
+  const out = [];
+  const varint = (n) => { while(n > 127){ out.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); } out.push(n); };
+  out.push(0x08); varint(sec);
+  out.push(0x10); varint(us);
+  return Uint8Array.from(out);
+}
+
+/* ---------------- Nyquist 圆拟合 ----------------
+   代数最小二乘：x²+y² = a·x + b·y + c → 圆心 (a/2, b/2)，r = √(c + xm² + ym²)
+   cfit = 各点到拟合圆的 RMS 残差 / 半径：接触质量指标，接触好时通常 < 0.1 */
+function fitCircle(pts){
+  const n = pts.length;
+  if(n < 3) return null;
+  let Sxx = 0, Sxy = 0, Sx = 0, Syy = 0, Sy = 0, S1 = 0, Bx = 0, By = 0, B1 = 0;
+  for(const q of pts){
+    const x = q.re, y = q.im, w = x * x + y * y;
+    Sxx += x * x; Sxy += x * y; Sx += x; Syy += y * y; Sy += y; S1 += 1;
+    Bx += x * w; By += y * w; B1 += w;
+  }
+  const A = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, S1]], b = [Bx, By, B1];
+  for(let i = 0; i < 3; i++){
+    let piv = i;
+    for(let k = i + 1; k < 3; k++) if(Math.abs(A[k][i]) > Math.abs(A[piv][i])) piv = k;
+    if(Math.abs(A[piv][i]) < 1e-12) return null;
+    const ta = A[i]; A[i] = A[piv]; A[piv] = ta;
+    const tb = b[i]; b[i] = b[piv]; b[piv] = tb;
+    for(let k = i + 1; k < 3; k++){
+      const f = A[k][i] / A[i][i];
+      for(let j = i; j < 3; j++) A[k][j] -= f * A[i][j];
+      b[k] -= f * b[i];
+    }
+  }
+  const z = [0, 0, 0];
+  for(let i = 2; i >= 0; i--){
+    let t = b[i];
+    for(let j = i + 1; j < 3; j++) t -= A[i][j] * z[j];
+    z[i] = t / A[i][i];
+  }
+  const xm = z[0] * 0.5, ym = z[1] * 0.5, rr = z[2] + xm * xm + ym * ym;
+  if(!(rr > 0)) return null;
+  const r = Math.sqrt(rr);
+  let se = 0;
+  for(const q of pts){ const d = Math.hypot(q.re - xm, q.im - ym) - r; se += d * d; }
+  return { cx: xm, cy: ym, r, cfit: Math.sqrt(se / n) / r };
+}
+
+/* ---------------- EDA：SCL / SCR ----------------
+   与厂商上位机同口径：取 12 Hz 一路算电导，2 点平均去交替，指数平滑分 tonic / phasic。 */
+class EdaProc{
+  constructor(fs = 8, alpha = 0.04, thr = 0.02, minGap = 2.0){
+    this.fs = fs; this.a = alpha; this.thr = thr; this.gap = minGap;
+    this.scl = null; this.hist = []; this.lastPeak = -1e9; this.g = [];
+    this.deint = true; this.prevG = null;
+    this.peakT = []; this.peakA = [];
+  }
+  update(t, imp){
+    const z = imp[0] || { re: 0, im: 0 };
+    const mag = Math.hypot(z.re, z.im);
+    const Graw = mag < 1e-9 ? 0 : 1e6 / mag;                     // 西门子 → µS
+    // 去交替：长度 2 的滑动平均在 Nyquist 处是零点，正好消掉两相交织
+    let G = Graw;
+    if(this.deint && this.prevG !== null) G = (Graw + this.prevG) / 2;
+    this.prevG = Graw;
+    this.scl = (this.scl === null) ? G : this.a * G + (1 - this.a) * this.scl;
+    const scr = G - this.scl;
+    this.hist.push({ t, v: scr }); if(this.hist.length > this.fs * 3) this.hist.shift();
+    let peak = false;
+    if(this.hist.length >= 3){
+      const n = this.hist.length, c = this.hist[n - 2];
+      if(c.v > this.hist[n - 3].v && c.v >= this.hist[n - 1].v && c.v >= this.thr && (c.t - this.lastPeak) >= this.gap){
+        this.lastPeak = c.t; peak = true;
+        this.peakT.push(c.t); this.peakA.push(c.v);
+      }
+    }
+    // 60 秒滑窗 → SCR/min；厂商 arousal 是自编启发式，导出只为和上位机对得上，勿用于发表
+    while(this.peakT.length && t - this.peakT[0] > 60){ this.peakT.shift(); this.peakA.shift(); }
+    const scrPerMin = this.peakT.length;
+    const meanAmp = this.peakA.length ? this.peakA.reduce((a, b) => a + b, 0) / this.peakA.length : 0;
+    const arousal = this.peakA.length ? Math.round(Math.min(100, scrPerMin * 15 + meanAmp * 200)) : 0;
+    this.g.push(G); if(this.g.length > this.fs * 4) this.g.shift();
+    let sqi = 0;
+    if(this.g.length >= 8){
+      const mn = Math.min(...this.g), mx = Math.max(...this.g);
+      sqi += Math.min(40, (mx - mn) * 400);
+      const mean = this.g.reduce((a, b) => a + b, 0) / this.g.length;
+      const sd = Math.sqrt(this.g.reduce((s, v) => s + (v - mean) ** 2, 0) / this.g.length);
+      sqi += Math.min(30, Math.max(0, 30 - sd * 60));
+    }
+    sqi += (mag > 1000 && mag < 1e7) ? 30 : (mag > 0 ? 15 : 0);
+    return { G, Graw, scl: this.scl, scr, peak, scrPerMin, arousal, sqi: Math.round(Math.min(100, sqi)) };
+  }
+}
+
+/* ---------------- 串口 GSR ---------------- */
+// 一行 "millis,adc"（也接受空格/分号分隔，或只有一个 adc）
+function parseGsrLine(line){
+  const parts = String(line).trim().split(/[,\s;]+/).filter(s => s !== '').map(Number).filter(v => isFinite(v));
+  if(!parts.length) return null;
+  return parts.length >= 2 ? { millis: parts[0], adc: parts[1] } : { millis: null, adc: parts[0] };
+}
+/* Grove GSR：R = ((1024 + 2v) × 10000) / (512 − v) Ω，v 为 10 bit 读数。
+   flip=true 时先做中点镜像 v' = 511 − v（实测这块模块极性与 Grove 原式相反）。 */
+function gsrToOhm(v10, flip){
+  let v = flip ? (511 - v10) : v10;
+  if(v < 0) v = 0;
+  if(v >= 511) return null;
+  return ((1024 + 2 * v) * 10000) / (512 - v);
+}
+/* 串口时钟：host = millis + θ。θ 是「到达时刻 − millis」在最近 windowMs 内的最小值（传输延迟不会是负的，
+   最小值就是最接近真实的那一行），并且限速追踪：θ 每 1 ms 设备时间最多变 slew ms（默认 1%）。
+     · 主机卡顿：积压的行一起迟到，偏移变大，不影响窗口最小值，时间轴不动。
+     · 板子时钟偏快或偏慢（Uno 的陶瓷谐振器可到 0.5%）：最小值跟着漂，θ 以不超过 1% 的速度平滑跟上，
+       采样间隔最多被拉伸或压缩 1%，时间轴始终单调，没有跳变。
+     · millis 倒退（板子复位）：只能重新锚定，通过 event='reset' 报出来写进 LINK EVENTS。
+   （旧实现一行迟到 2 s 就把锚点挪到这一行的到达时刻，卡顿一次就留下永久偏移，时钟漂移时还会跳变。） */
+class SerialClock{
+  constructor(opt){
+    opt = opt || {};
+    this.windowMs = opt.windowMs || 30000;
+    this.slew = opt.slew || 0.01;
+    this.theta = null; this.lastDev = null; this.hist = [];
+  }
+  map(dev, arrival){
+    let event = null;
+    const off = arrival - dev;
+    if(this.theta === null || dev < this.lastDev){
+      if(this.theta !== null) event = 'reset';
+      this.theta = off; this.hist = [];
+    }else{
+      const maxStep = this.slew * (dev - this.lastDev);
+      this.hist.push([dev, off]);
+      while(this.hist.length && dev - this.hist[0][0] > this.windowMs) this.hist.shift();
+      let target = off;
+      for(const h of this.hist) if(h[1] < target) target = h[1];
+      const d = target - this.theta;
+      this.theta += Math.max(-maxStep, Math.min(maxStep, d));
+    }
+    if(!this.hist.length) this.hist.push([dev, off]);
+    this.lastDev = dev;
+    return { hostMs: dev + this.theta, event };
+  }
+}
+
+return { EPOCH_2000_TO_1970, PMD_TYPES,
+         signExtend, readIntLE, readBitsLE,
+         parsePmdHeader, readRawFrames, decodeDeltaFrames, parsePmdPacket,
+         parsePmdControlResponse, applyPmdFactor,
+         packetSampleTimes, DeviceClockGuard, hostOffset, hostMs, fitClockPairs,
+         csvDeviceBlocks, csvField,
+         cobsDecode, cobsEncode, pbVarint, pbParseEdaBuffer, pbEncodeTimestamp,
+         fitCircle, EdaProc, parseGsrLine, gsrToOhm, SerialClock };
+})();
+if(typeof module !== 'undefined' && module.exports) module.exports = BSCore;
+</script>
+
 <script>
 // ★ 2026-09-03：原代码读一个 id=Combined 的隐藏 div 的 clientHeight 来定 RDP 抽稀粒度。
 // 新布局里没有这个元素，改成常量，取值与原来那个 div 的高度一致，数值行为完全不变。
@@ -472,7 +988,7 @@ function buildDropCsvSection(){
   if(!d.length) return 'LINK EVENTS (none — 全程无掉线)' + NL + NL;
   const lines = ['LINK EVENTS (unix_host_ms 同一根时间轴；数据缺口的成因记录)',
                  'unix_host_ms,iso_utc,device,event,detail'];
-  for(const k of d) lines.push(`${k.t},${k.iso},${k.dev},${k.ev},${String(k.detail||'').replace(/,/g,' ')}`);
+  for(const k of d) lines.push(`${k.t},${k.iso},${BSCore.csvField(k.dev)},${BSCore.csvField(k.ev)},${BSCore.csvField(k.detail)}`);
   return lines.join(NL) + NL + NL;
 }
 
@@ -482,7 +998,7 @@ function buildMarkerCsvSection(){
   if(!m.length) return 'MARKERS (none)' + NL + NL;
   const lines = ['MARKERS (unix_host_ms 同一根时间轴，可直接和数据行对齐)',
                  'unix_host_ms,iso_utc,name'];
-  for(const k of m) lines.push(`${k.unix_ms},${k.iso},${String(k.name).replace(/,/g,' ')}`);
+  for(const k of m) lines.push(`${k.unix_ms},${k.iso},${BSCore.csvField(k.name)}`);
   return lines.join(NL) + NL + NL;
 }
 
@@ -496,11 +1012,10 @@ function buildMarkerCsvSection(){
    要更准就用 CSV 顶部 SYNC 表里的 offset/skew 做线性校正。
    unix_dev_ms 原样保留，用来诊断设备自己的时钟。 */
 function hostOffset(dev){
-  if (systemStartUTC[dev] == null || starttime[dev] == null) return 0;
-  return systemStartUTC[dev] - (starttime[dev] + EPOCH_2000_TO_1970);
+  return BSCore.hostOffset(starttime[dev], systemStartUTC[dev]);
 }
 function hostMs(dev, dev_ms){
-  return (dev_ms + EPOCH_2000_TO_1970 + hostOffset(dev)).toFixed(3);
+  return BSCore.hostMs(dev_ms, hostOffset(dev)).toFixed(3);
 }
 
 /* ---------- Per-packet clock sync ---------- */
@@ -519,44 +1034,18 @@ function pushSyncPair(dev, stream, dev_ms_since_2000, sys_ms){
   S.pairsAll.push([x,y]);
   if(S.pairs.length > SYNC_WINDOW) S.pairs.shift();
 
-  // Stable linear fit using mean-centering
-  const arr = S.pairs;
-  const n = arr.length;
-  if(n >= 2){
-    let meanX = 0, meanY = 0;
-    for(const [xx,yy] of arr){ meanX += xx; meanY += yy; }
-    meanX /= n; meanY /= n;
-
-    let varX = 0, covXY = 0;
-    for(const [xx,yy] of arr){
-      const dx = xx - meanX, dy = yy - meanY;
-      varX += dx*dx; covXY += dx*dy;
-    }
-
-    let skew = 1, offset = meanY;
-    if (varX !== 0){
-      skew = covXY / varX;
-      offset = meanY - skew * meanX;
-    }
-    S.est = {offset, skew};
-
-    const diffs = arr.map(([xx,yy]) => yy - xx).sort((a,b)=>a-b);
-    const p05 = diffs[Math.max(0, Math.floor(diffs.length*0.05)-1)];
-    const med = diffs[Math.floor(diffs.length*0.5)];
-    // ★ 2026-09-02 新增：p05/median 是 sys-dev 的原始差，只有在表内时钟对过时才等于真实延迟。
-    //   2026-09-02 那次 H10 的 RTC 停在 2019 年，这两列成了 2.4e11 这种废数。
-    //   下面这两个"相对最小值"的量与表内时钟绝对值无关，多设备压测时可以直接横向比。
-    const p95 = diffs[Math.min(diffs.length-1, Math.floor(diffs.length*0.95))];
-    const mn  = diffs[0];
-    S.stats = {p05, median: med, p95, min: mn, meanX};
-  }
+  // 中心化最小二乘；p05/median 是 sys-dev 的原始差，只有表内时钟对过时才等于真实延迟。
+  // jitter（median-min、p95-min）与表内时钟绝对值无关，可横向比较设备。数学见 BSCore.fitClockPairs。
+  const fit = BSCore.fitClockPairs(S.pairs);
+  if(fit){ S.est = fit.est; S.stats = fit.stats; }
 }
 function renderSyncPanel(){
   // ★ 2026-09-03 UI 重做：原来往 #syncPanel 里塞一坨 white-space:pre 的纯文本。
   //   改为渲染成带阈值配色的表格（数学完全不变，只是换了呈现）。
   UI.syncTable();
 }
-function buildSyncCsvSection(summaryOnly=false, syncDelta=null){
+// filter(dev, stream)：逐包段只写这些流（每个分组文件只带自己那路的逐包记录，见 GROUP_SYNC_STREAM）
+function buildSyncCsvSection(summaryOnly=false, syncDelta=null, filter=null){
   const NL = newline;
   const lines = [];
   lines.push('SYNC summary (sys ~= offset + skew * unix(dev_ms))');
@@ -582,6 +1071,7 @@ function buildSyncCsvSection(summaryOnly=false, syncDelta=null){
     lines.push('Device,Stream,PacketIdx,unix_dev_ms,sys_utc_ms,diff_ms');
     for(const dev in syncStore){
       for(const stream in syncStore[dev]){
+        if(filter && !filter(dev, stream)) continue;
         const arr = syncStore[dev][stream].pairsAll;
         const startIdx = syncDelta?.[dev]?.[stream] ?? 0;
         for(let i=startIdx;i<arr.length;i++){
@@ -604,9 +1094,39 @@ let autoSave = {
   firstStreamByDev: {},
   lastRowIdxByDev: {},               // legacy cursor (safe to keep)
   lastRowIdxByDevByKey: { PPG: {}, ACC: {}, ECG: {} }, // ★ 分组游标
-  lastSyncIdx: {},
+  lastSyncIdxByKey: {},               // ★ 逐包 SYNC 游标，按分组：lastSyncIdxByKey[group][dev][stream]
   sessionStart: null
 };
+// 每个导出分组对应 syncStore 里的哪一路（EDAZ 和 EDA 是同一包数据）
+const GROUP_SYNC_STREAM = { PPG:'PPG', ACC:'ACC', ECG:'ECG', EDA:'EDA', EDAZ:'EDA', GSR:'GSR' };
+
+/* 把 dataobject 里某个分组的数据整理成 BSCore.csvDeviceBlocks 要的列块。
+   ★ 2026-11 修：以前 FULL 文件和手动导出给 dataobject 里「每一台」设备都写一组表头，
+   但数据区只写含有该分组数据的设备。比如先连 GSR 再连 H10，FULL_ECG 的表头第一组是
+   …@GSR，数据却是 H10 的，pandas 读出来列名全错。现在表头和数据都只来自同一份 blocks。 */
+function exportBlocks(for_streams, cursorByDev){
+  const blocks = [];
+  for (const dev in dataobject){
+    const first = chooseFirstStream(dev, for_streams);
+    if (!first) continue;
+    const x = dataobject[dev][first]?.x || [];
+    if (!x.length) continue;
+    const cols = {};
+    for (const s of for_streams) cols[s] = dataobject[dev][s]?.y;
+    const start = cursorByDev ? Math.max(0, Math.min(cursorByDev[dev] ?? 0, x.length)) : 0;
+    blocks.push({ dev, x, cols, start, end: x.length, offset: hostOffset(dev) });
+  }
+  return blocks;
+}
+function groupSyncFilter(groupKey, blocks){
+  const devs = new Set(blocks.map(b=>b.dev));
+  const stream = GROUP_SYNC_STREAM[groupKey];
+  return (dev, s) => devs.has(dev) && s === stream;
+}
+function legacyInfoLine(dev){
+  const t0 = getFirstTime(dev);
+  return `${dev}: start time(ms-since-2000)=${t0},UTC time(ms-since-1970),${(t0 + EPOCH_2000_TO_1970).toFixed(3)},SystemStart_UTC_ms,${systemStartUTC[dev]}`;
+}
 const FIRST_STREAM_PRIORITY = ['ECG','PPG0','PPGsum','acc_v','acc_x','PPG1','PPG2','ambient'];
 
 // recording state: only autosave while any stream is ON
@@ -715,89 +1235,30 @@ function startAutoSaveFallbackDownloads(){
 // ---------- 分组增量 CSV（用于 autosave） ----------
 function buildIncrementalCSV_GROUP(for_streams, groupKey){
   const NL = newline;
+  if (!autoSave.lastRowIdxByDevByKey[groupKey]) autoSave.lastRowIdxByDevByKey[groupKey] = {};
+  if (!autoSave.lastSyncIdxByKey[groupKey]) autoSave.lastSyncIdxByKey[groupKey] = {};
+  const rowCur  = autoSave.lastRowIdxByDevByKey[groupKey];
+  const syncCur = autoSave.lastSyncIdxByKey[groupKey];
 
-  // 记下 SYNC 起始位置（这次只写新包）
-  const syncDeltaStart = {};
-  for (const dev in syncStore){
-    syncDeltaStart[dev] = {};
-    for (const stream in syncStore[dev]){
-      const last = (autoSave.lastSyncIdx?.[dev]?.[stream] ?? 0);
-      syncDeltaStart[dev][stream] = last;
-    }
-  }
+  const blocks = exportBlocks(for_streams, rowCur);
+  const filt = groupSyncFilter(groupKey, blocks);
 
-  let csv = buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false, syncDeltaStart);
+  // ★ 2026-11 修：SYNC 逐包游标原来全组共用，同一次落盘里第一个分组把所有设备的逐包记录
+  //   都写走了，ECG/ACC 等后面的文件只剩空段。现在每个分组只写自己那路、自己的游标。
+  let csv = buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false, syncCur, filt);
 
-  // header per device
-  const infoLines = [];
-  const headerChunks = [];
-  const firstStreamByDevLocal = {};
-  const startIdxByDev = {};
-  const endIdxByDev = {};
-  for (const dev in dataobject) {
-    const t0 = getFirstTime(dev);
-    const utcMs = (t0 + EPOCH_2000_TO_1970).toFixed(3);
-    infoLines.push(`${dev}: start time(ms-since-2000)=${t0},UTC time(ms-since-1970),${utcMs},SystemStart_UTC_ms,${systemStartUTC[dev]}`);
-
-    const first = chooseFirstStream(dev, for_streams);
-    if (!first) continue;
-    firstStreamByDevLocal[dev] = first;
-
-    const xFirst = dataobject[dev][first].x || [];
-    const prevIdx = (autoSave.lastRowIdxByDevByKey[groupKey]?.[dev] ?? 0);
-    startIdxByDev[dev] = Math.max(0, Math.min(prevIdx, xFirst.length));
-    endIdxByDev[dev]   = xFirst.length;
-
-    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms', ...for_streams];
-    headerChunks.push(pieces.join(','));
-  }
-  csv += infoLines.join(NL) + NL + headerChunks.join(',') + NL;
-
-  // data rows
-  let globalRow = 0;
-  while (true) {
-    let haveData = false;
-    const rowPieces = [];
-    for (const dev in firstStreamByDevLocal) {
-      const first = firstStreamByDevLocal[dev];
-      const xFirst = dataobject[dev][first].x || [];
-      const start = startIdxByDev[dev] || 0;
-      const end   = endIdxByDev[dev] || 0;
-      const idx   = start + globalRow;
-
-      const devPieces = [];
-      if (idx < end) {
-        const dev_ms = xFirst[idx];
-        const sensor_us64 = Math.round(dev_ms * 1000);
-        const unix_ms     = (dev_ms + EPOCH_2000_TO_1970).toFixed(3);
-        devPieces.push(sensor_us64, unix_ms, hostMs(dev, dev_ms));
-        for (const s of for_streams) {
-          const yArr = dataobject[dev][s]?.y;
-          if (yArr && idx < yArr.length) { devPieces.push(yArr[idx]); haveData = true; }
-          else { devPieces.push(''); }
-        }
-      }else{
-        devPieces.push('', '', '');
-        for (const s of for_streams) devPieces.push('');
-      }
-      rowPieces.push(devPieces.join(','));
-    }
-    if (!haveData) break;
-    csv += rowPieces.join(',') + NL;
-    globalRow++;
-  }
+  const { header, rows } = BSCore.csvDeviceBlocks(blocks, for_streams);
+  csv += blocks.map(b=>legacyInfoLine(b.dev)).join(NL) + NL + header + NL;
+  for (const r of rows) csv += r + NL;
   csv += NL + NL;
 
   // 更新游标（按组）
-  if (!autoSave.lastRowIdxByDevByKey[groupKey]) autoSave.lastRowIdxByDevByKey[groupKey] = {};
-  for (const dev in firstStreamByDevLocal){
-    autoSave.lastRowIdxByDevByKey[groupKey][dev] = endIdxByDev[dev];
-  }
-  if (!autoSave.lastSyncIdx) autoSave.lastSyncIdx = {};
+  for (const b of blocks) rowCur[b.dev] = b.end;
   for (const dev in syncStore){
-    if (!autoSave.lastSyncIdx[dev]) autoSave.lastSyncIdx[dev] = {};
     for (const stream in syncStore[dev]){
-      autoSave.lastSyncIdx[dev][stream] = syncStore[dev][stream].pairsAll.length;
+      if (!filt(dev, stream)) continue;
+      if (!syncCur[dev]) syncCur[dev] = {};
+      syncCur[dev][stream] = syncStore[dev][stream].pairsAll.length;
     }
   }
   return csv;
@@ -808,20 +1269,20 @@ async function onAutoSaveTick(force=false){
   try{
     if (!recordingActive && !force) return;
 
-    // \u2605 \u6539\u4E3A\u904D\u5386 EXPORT_GROUPS\uFF1APPG / ACC / ECG \u8D70\u540C\u4E00\u6761\u8DEF\u5F84
+    // ★ 改为遍历 EXPORT_GROUPS：PPG / ACC / ECG 走同一条路径
     for (const g of EXPORT_GROUPS){
       const streams = streamsPresent(g.cols);
       if (!streams.length) continue;
       if (!autoSave.lastRowIdxByDevByKey[g.key]) autoSave.lastRowIdxByDevByKey[g.key] = {};
 
-      // \u2605 \u53BB\u6389\u539F\u6765\u7684 "|| force"\uFF1A\u505C\u6B62\u843D\u76D8\u65F6\u4E0D\u518D\u5199\u51FA\u53EA\u6709\u8868\u5934\u3001\u6CA1\u6709\u6570\u636E\u884C\u7684\u7A7A\u6587\u4EF6
+      // ★ 去掉原来的 "|| force"：停止落盘时不再写出只有表头、没有数据行的空文件
       if (!hasNewRows(streams, autoSave.lastRowIdxByDevByKey[g.key])) continue;
 
       const csv = buildIncrementalCSV_GROUP(streams, g.key);
       const ts = timestampForFilename();
       const fname = `Polar_auto_${ts}_${g.key}.csv`;
       if (autoSave.dirHandle){
-        const BOM = '\uFEFF';
+        const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
         const h = await autoSave.dirHandle.getFileHandle(fname, { create: true });
         const w = await h.createWritable(); await w.write(BOM + csv); await w.close();
       }else{
@@ -843,41 +1304,35 @@ async function flushAutosaveNow({ alsoSaveFull=false }={}){
 }
 
 // ---------- FINAL FULL：各保存一份 ----------
-function buildDataMatrixOnlyCsv(for_streams){
+function buildDataMatrixOnlyCsv(for_streams, groupKey){
   const NL = newline;
-
-  // Header: one device-chunk after another (side-by-side)
-  // ★ 2026-09-06：原来 FULL 文件只写裸表头，同类型多设备（比如两台 Verity Sense）
-  //   并排的两组列名完全一样，分不出哪组是哪台。增量文件本来就有 infoLines，
-  //   这里补上，并在每个列名后加 @设备名，两条路都能定位。
-  const headerChunks = [], infoLines = [];
-  let blockIdx = 0;
-  for (const dev in dataobject) {
-    const t0 = getFirstTime(dev);
-    infoLines.push(`COLUMN BLOCK ${++blockIdx}: ${dev}`
+  // ★ 2026-09-06：每个列名后加 @设备名，同类型多设备（比如两台 Verity Sense）也分得清。
+  // ★ 2026-11：COLUMN BLOCK 编号和表头只算真正有这组数据的设备；
+  //   另补上 SYNC summary（README 说每份文件都带，FULL 以前漏了），做 skew 线性校正要用。
+  const blocks = exportBlocks(for_streams, null);
+  const infoLines = blocks.map((b, i) => {
+    const t0 = getFirstTime(b.dev);
+    return `COLUMN BLOCK ${i+1}: ${b.dev}`
       + `,start(ms-since-2000)=${t0},UTC(ms-since-1970)=${(t0+EPOCH_2000_TO_1970).toFixed(3)}`
-      + `,SystemStart_UTC_ms=${systemStartUTC[dev]}`);
-    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms', ...for_streams].map(c=>c+'@'+dev);
-    headerChunks.push(pieces.join(','));
-  }
-
-  // Reuse row builder but limit to 'for_streams'
-  const csvRows = getCSVdata(for_streams);
-  return buildMarkerCsvSection() + buildDropCsvSection()
+      + `,SystemStart_UTC_ms=${systemStartUTC[b.dev]}`
+      + `,host_offset_ms=${b.offset.toFixed(3)}`;
+  });
+  const { header, rows } = BSCore.csvDeviceBlocks(blocks, for_streams, { suffixDevice: true });
+  return buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(true)
        + infoLines.join(NL) + NL + NL
-       + headerChunks.join(',') + NL + csvRows;
+       + header + NL + rows.join(NL) + NL + NL;
 }
 
 async function saveFullCsvToFolder(){
   const tsStart = autoSave.sessionStart ? timestampForFilename(autoSave.sessionStart) : 'session';
   const tsEnd = timestampForFilename();
-  const BOM = '\uFEFF';
+  const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
 
-  // \u2605 \u540C\u6837\u6539\u4E3A\u904D\u5386 EXPORT_GROUPS\uFF0CECG \u7684 FULL \u6587\u4EF6\u4E0D\u4F1A\u518D\u6F0F
+  // ★ 同样改为遍历 EXPORT_GROUPS，ECG 的 FULL 文件不会再漏
   for (const g of EXPORT_GROUPS){
     const streams = streamsPresent(g.cols);
     if (!streams.length) continue;
-    const csv = buildDataMatrixOnlyCsv(streams);
+    const csv = buildDataMatrixOnlyCsv(streams, g.key);
     const fname = `Polar_full_${tsStart}__to__${tsEnd}_${g.key}.csv`;
     if (autoSave.dirHandle){
       const h = await autoSave.dirHandle.getFileHandle(fname, { create: true });
@@ -889,40 +1344,51 @@ async function saveFullCsvToFolder(){
 }
 
 /* ---------- The rest (graphing, device, CSV) ---------- */
-function addDevice(){
-  document.getElementById("Sense").disabled=true;
-  num=Object.keys(obj)+1;
-  navigator.bluetooth.requestDevice({
+const POLAR_MODELS = ['H10','Sense'];   // 广播名 "Polar H10 XXXX" / "Polar Sense XXXX"（Verity Sense）
+
+// 连 GATT、拿 PMD 控制/数据两个特征、开通知。首次连接和自动重连共用。
+async function pmdAttach(o){
+  o.server    = await o.device.gatt.connect();
+  o.service   = await o.server.getPrimaryService(PMD_SERVICE);
+  o.character = await o.service.getCharacteristic(PMD_CONTROL);
+  o.character.addEventListener('characteristicvaluechanged', printcontrolvalue);
+  await o.character.startNotifications();
+  o.data = await o.service.getCharacteristic(PMD_DATA);
+  await o.data.startNotifications();
+  o.data.addEventListener('characteristicvaluechanged', printHeartRate);
+}
+
+async function addDevice(){
+  // ★ 2026-11：Firefox / Safari 没有 navigator.bluetooth，原来这里同步抛 TypeError，
+  //   按钮永远停在禁用态，用户看不到任何提示。
+  if(!navigator.bluetooth){ alert(UI.t('err.nobt')); return; }
+  const btn = document.getElementById("Sense");
+  if(btn) btn.disabled = true;
+  try{
+    const newdevice = await navigator.bluetooth.requestDevice({
       filters: [{namePrefix: "Polar"}],
-      acceptAllDevices: false,
-      manufacturerData: [{companyIdentifier: 0x00D1}],
       optionalServices: [PMD_SERVICE]
-  }).then(async newdevice=>{
-    if(newdevice!==undefined){
-      name=newdevice.name;
-      devicetype=name.split(" ")[1];
-      obj[num]=structuredClone(devices[devicetype]);
-      obj[num]['device']=newdevice;
-      var mydiv = document.getElementById(name);
-      if (mydiv === null){
-        await obj[num].device.addEventListener('gattserverdisconnected', onDisconnected);
-        obj[num].server = await obj[num].device.gatt.connect()
-        obj[num].service = await obj[num].server.getPrimaryService(PMD_SERVICE);
-        obj[num].character = await obj[num].service.getCharacteristic(PMD_CONTROL);
-        controlfunction=await obj[num].character.addEventListener('characteristicvaluechanged',printcontrolvalue);
-        await obj[num].character.startNotifications();
-        obj[num].data = await obj[num].service.getCharacteristic(PMD_DATA);
-        await obj[num].data.startNotifications();
-        outputfunction=await obj[num].data.addEventListener('characteristicvaluechanged',printHeartRate);
-        serviceButtons(name,devicetype);
-        Object.defineProperty(obj, name,Object.getOwnPropertyDescriptor(obj, num));
-        delete obj[num];
-        layoutCombined[name]=JSON.parse(JSON.stringify(layoutCombinedg));
-        if(devicetype=="Sense"){layoutCombined[name].yaxis.range=[-yscale_PPG_default,yscale_PPG_default/3];}
-        else{layoutCombined[name].yaxis.range=[-yscale_ECG_default,yscale_ECG_default];}
-      }
-    }
-  }).catch(()=>{}).finally(()=>{ document.getElementById("Sense").disabled=false; });
+    });
+    if(!newdevice) return;
+    const name = newdevice.name || '';
+    const devicetype = name.split(" ")[1];
+    if(!POLAR_MODELS.includes(devicetype)){ alert(UI.t('err.polarModel').replace('{name}', name)); return; }
+    if(document.getElementById(name) !== null) return;           // 已经连着
+    const o = structuredClone(devices[devicetype]);
+    o.device = newdevice;
+    newdevice.addEventListener('gattserverdisconnected', onDisconnected);
+    await pmdAttach(o);
+    obj[name] = o;
+    layoutCombined[name]=JSON.parse(JSON.stringify(layoutCombinedg));
+    if(devicetype=="Sense"){layoutCombined[name].yaxis.range=[-yscale_PPG_default,yscale_PPG_default/3];}
+    else{layoutCombined[name].yaxis.range=[-yscale_ECG_default,yscale_ECG_default];}
+    serviceButtons(name,devicetype);
+  }catch(err){
+    if(err && err.name==='NotFoundError'){ /* 用户在选择器里取消 */ }
+    else { console.error('Polar connect', err); alert(UI.t('err.connect') + (err && err.message || err)); }
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 function sleep(ms){return new Promise(resolve => setTimeout(resolve, ms));}
 function ButtonColour(buttonID,colour,state){id=document.getElementById(buttonID);id.style.backgroundColor=colour;id.disabled=!state}
@@ -932,13 +1398,20 @@ async function ActivateStream(name,stream){
   if(_kind==='eda') return EDA.startStream(name,stream);
   if(_kind==='gsr') return GSR.startStream(name,stream);
   let tickbox=document.getElementById(name+stream.name);
-  if(obj[name].character!==undefined){
+  const o = obj[name];
+  if(o && o.reconnecting){
+    // 掉线重连中：先记下「应该在录」，重连成功后 polarReconnect 会把它打开
+    if(tickbox) tickbox.checked=true;
+    setStreamFlag(name, stream.name, true);
+    return;
+  }
+  if(o && o.character!==undefined){
     var Init = [0x02,stream.id];
     BytesToSend=Init.concat(stream.code_start);
-    await obj[name].character.writeValue(new Uint8Array(BytesToSend));
-    tickbox.checked=true;
+    await o.character.writeValue(new Uint8Array(BytesToSend));
+    if(tickbox) tickbox.checked=true;
     setStreamFlag(name, stream.name, true);   // track recording state
-  }else{tickbox.checked=false;}
+  }else if(tickbox){tickbox.checked=false;}
 }
 async function AllStreamsOn(name){for(s in obj[name].output){await ActivateStream(name,streams[obj[name].output[s]]);await sleep(100);}}
 async function AllAllStreamsOn(){if(obj.length>0){for(name in obj){await AllStreamsOn(name);}}}
@@ -953,7 +1426,17 @@ async function streamOff(name,stream){
   const _kind = obj[name] && obj[name].kind;
   if(_kind==='eda') return EDA.stopStream(name,stream);
   if(_kind==='gsr') return GSR.stopStream(name,stream);
-  off=new Uint8Array([0x03,stream.id]);await obj[name].character.writeValue(off);document.getElementById(name+stream.name).checked=false;setStreamFlag(name, stream.name, false);}
+  // ★ 2026-11：设备正在重连时写控制点会抛错，原来会让「停止录制」半途中断、
+  //   其余设备停不下来。现在写不进去只记一笔，状态照样清掉。
+  const o = obj[name];
+  try{
+    if(o && o.character && !o.reconnecting) await o.character.writeValue(new Uint8Array([0x03,stream.id]));
+  }catch(e){ console.warn('streamOff', name, stream.name, e); }
+  const box=document.getElementById(name+stream.name); if(box) box.checked=false;
+  // 用户主动停的流，下次开始不算「缺口」；掉线重连不走这里，缺口照常按设备时钟算
+  if(lastPacketDevTime[name]) delete lastPacketDevTime[name][stream.id];
+  setStreamFlag(name, stream.name, false);
+}
 async function disconnect(){for(const [name,device] of Object.entries(devices)){if("server" in device){for(const stream of Object.entries(device.output).reverse()){await streamOff(name,streams[stream[1]]);}}}}
 function pushDataTrace(device,name,x,y){
   if(!(name in traces[device])){addTrace(device,name);}
@@ -980,7 +1463,6 @@ function DataArrayLength(devicename,name){
     return(0);
   }else{return(dataobject[devicename][name].x.length);}
 }
-function completeDeltaFrame(data,num_chan,bytes){headerpointer=10+num_chan*bytes;framepointer=headerpointer+2;data_array=getInitialSensorValues(data.slice(10,headerpointer),bytes);while(framepointer<data.byteLength){DeltaFrameDetails=DeltaFrameDescription(data.slice(headerpointer,framepointer),num_chan);nextheaderpointer=framepointer+DeltaFrameDetails.bytes;Frame=reSlice(ChunkArray(data.slice(framepointer,nextheaderpointer)),DeltaFrameDetails.bits,DeltaFrameDetails.channels);data_array=addDeltaframe(Frame, data_array);headerpointer=nextheaderpointer;framepointer=headerpointer+2;}return data_array;}
 function defineLine(color,name,linetype){return {type:'scattergl',mode:linetype,showlegend:true,line:{color:'rgb('+color+')', width:1}, name:name,x:[],y:[]}}
 function serviceButtons(name,devicetype){
   // ★ 2026-09-03 UI 重做：原来这里用 insertAdjacentHTML 往 #streams / #graphsdiv
@@ -995,70 +1477,136 @@ var signedconvert=[]; signedconvert[0]=0; signedconvert[255]=2**16;
 function alterGain(name,fraction){layoutCombined[name].yaxis.range=[layoutCombined[name].yaxis.range[0]*fraction,layoutCombined[name].yaxis.range[1]*fraction];}
 ecg_timestep=1000/130; H10_rate=0xC8; acc_timestep=1000/H10_rate;
 
-// ★ 2026-09-02 包边界时间戳修正
-// 原实现把采样间隔写死成标称值（H10 ACC 5.000ms / ECG 7.692ms），但设备实际 ODR 未必等于标称值。
-// 2026-09-02 实测 H10 加速度计：每包 36 样本，设备时间戳每包只前进 177.65ms（而非 36×5=180ms），
-// 真实间隔 4.935ms ≈ 202.6Hz。写死 5ms 会让每个包接缝处的时间轴倒退约 2.35ms，
-// 累计让整条时间轴走快 1.3%。同一次测试里 ECG 基本吻合标称（73 样本 / 561.96ms = 129.9Hz）。
-// 修法：用相邻两包设备时间戳之差除以样本数得到真实间隔；首包或断流后回退标称值。
-var lastPacketDevTime = {};
+// ★ 2026-09-02 包边界时间戳修正：设备实际 ODR 未必等于标称值（实测 H10 ACC 每包 36 样本，
+//   设备时间戳每包只前进 177.65 ms ≈ 202.6 Hz）。用相邻两包时间戳差 / 样本数得到真实间隔。
+// ★ 2026-11 修：PMD 时间戳是本包「最后一个」样本的时刻，原来把它当成了最后一个样本之后
+//   一个间隔，整条时间轴早了一个采样间隔（ECG 7.7 ms、ACC 5 ms，两路还不一样）。
+//   另外断流后的缺口现在会写进 LINK EVENTS（event=gap）。设备时间没往前走的包整包丢弃（返回 null），
+//   时间轴始终单调；数学见 BSCore.packetSampleTimes。
+var lastPacketDevTime = {};   // lastPacketDevTime[dev][type] = {end, step}
 
-function fillTimeArray(Type,devicename,t,dTime,num,step){
-  const packet_end = Number(new BigInt64Array(t)[0])/1000000;   // 本包最后一个样本的设备时刻
+function fillTimeArray(Type,devicename,packetEndMs,dTime,num,step){
   if(!lastPacketDevTime[devicename]) lastPacketDevTime[devicename]={};
   const prev = lastPacketDevTime[devicename][Type];
-
-  let realStep = step;
-  if(prev!==undefined && num>0){
-    const measured = (packet_end - prev) / num;
-    // 只在包连续时采信实测值；断流或重连后间隔会异常，回退标称值避免把样本拉伸到断口上
-    if(measured > step*0.5 && measured < step*1.5) realStep = measured;
+  const r = BSCore.packetSampleTimes(packetEndMs, prev, num, step);
+  lastPacketDevTime[devicename][Type] = r.next;
+  const tn = BSCore.PMD_TYPES[Type]||Type;
+  if(r.gapMs > 0) logLinkEvent(devicename, 'gap', `${tn} ${r.gapMs.toFixed(0)} ms`);
+  else if(r.backwards) logLinkEvent(devicename, 'clock-backwards', `${tn} ${(packetEndMs-prev.end).toFixed(3)} ms，丢弃 ${num} 个样本`);
+  else if(r.irregular) logLinkEvent(devicename, 'clock-irregular', `${tn} ${((packetEndMs-prev.end)/num).toFixed(3)} ms/样本`);
+  if(starttime[devicename]===undefined && num>0){
+    const first = r.times[0], lag = packetEndMs - first;
+    if(firstTime==0){firstTime=dTime-lag}
+    starttime[devicename]=first;              // 首样本的设备时刻
+    systemStartUTC[devicename]=dTime-lag;     // 同一样本在主机钟上的时刻（含一次传输延迟）
   }
-  lastPacketDevTime[devicename][Type] = packet_end;
-
-  start_packet_time=packet_end-num*realStep;
-  computer_time=dTime-num*realStep;
-  if(starttime[devicename]===undefined){
-    var x = new Date("1/1/2000 00:00:00");var y = new Date("1/1/1970 00:00:00");
-    let seconds = Math.abs(x.getTime() - y.getTime())+start_packet_time;
-    startdate=new Date(seconds);
-    if(firstTime==0){firstTime=computer_time}
-    deviceEPOCH=computer_time-start_packet_time;
-    starttime[devicename]=start_packet_time;
-    systemStartUTC[devicename] = computer_time;
-  }
-  stream_time=start_packet_time;
-  a=createArray(num);
-  for(i=0;i<num;i++){a[i]=Math.round((stream_time+realStep*i)*1000)/1000;}
-  return a;
+  return r.drop ? null : r.times;
 }
 
 function createArray(length){var arr=new Array(length||0),i=length;if(arguments.length>1){var args=Array.prototype.slice.call(arguments,1);while(i--) arr[length-1-i]=createArray.apply(this,args);}return arr;}
-function WordstoSignedInteger(words,BitsPerWord){val=0;word_val=2**BitsPerWord;for(i=0;i<words.length;i+=1){val+=words[i]*word_val**i;}bits=words.length*BitsPerWord;if(val>2**(bits-1)){val=val-2**bits;}return val;}
-function getInitialSensorValues(a,bytes){a=new Uint8Array(a);sensors=createArray((a.length/bytes),1);offset=0;while(offset<a.length){sensors[offset/bytes][0]=WordstoSignedInteger(a.slice(offset,offset+bytes),8);offset+=bytes;};return(sensors);}
-function addDeltaframe(frame, data_array){chans=frame[0].length;for(offset=0;offset<frame.length;offset+=1){for(ch=0;ch<chans;ch+=1){data_array[ch].push((+data_array[ch].slice(-1)+frame[offset][ch]));}}return (data_array);}
-function DeltaFrameDescription(b,channels){a=new Uint8Array(b);bits=a[0];number=a[1];return({bits:bits, number:number, bytes:Math.ceil(number*bits/8*channels), channels:channels});}
-function ChunkByte(sbyte){n=[];ts=[1,4,16,64];tg=[3,12,48,192];for(a=0;a<4;a+=1){n[a]=(sbyte & tg[a])/ts[a]};return(n)}
-function ChunkArray(arr){arr=new Uint8Array(arr);offset=0;NewArray=[];while(offset<arr.length){NewArray.push(...ChunkByte(arr[offset]));offset+=1;}return(NewArray);}
 function HPfilter(array,last_in,last_out){f_arr=createArray(array.length);fraction=(1+1/(samplerate*timeconstant));array.forEach(function(value, n){last_out=f_arr[n]=Math.round((value+last_out-last_in)/fraction);last_in=value;});return(f_arr);}
-function reSlice(arr,bits,channels){offset=0;block=bits/2*channels;len=Math.floor(arr.length/block);f_array=createArray(len,channels);while(offset<len*block){for(a=0;a<channels;a+=1){mini_array=arr.slice(offset+a*bits/2,offset+(a+1)*bits/2);f_array[offset/block][a]=WordstoSignedInteger(mini_array,2);};offset+=block;}return(f_array);}
-function onDisconnected(event){
-  // ★ 2026-09-03 UI 重做：原实现只删 id=<设备名> 那个 span 和 graph 节点，
-  //   放到卡片式布局里会留下半张空卡；另外原来断开后 obj 里仍留着这台设备，
-  //   设备计数和 Start ALL 的遍历都会算上一台已经掉线的表。
-  //   这里改为整卡移除 + 从 obj 摘除；dataobject 保留，掉线前的数据仍可导出。
-  var name = event.target.name;
+/* ★ 2026-11：Polar 掉线不再等于设备没了。
+   原实现一断就删卡片、清流状态，H10 一次 BLE 抖动就让整场 ECG 作废（如果它是唯一在录的
+   设备，还会直接触发停止落盘），而且这次掉线不进 LINK EVENTS，数据缺口查不到原因。
+   现在和天琴座一样：记一笔 disconnect，退避重连最多 20 次，成功后把掉线前在录的流重新打开，
+   接着往同一份缓冲写。H10 的设备时钟不受 BLE 断开影响，hostOffset 锚点继续有效；
+   lastPacketDevTime 也保留，重连后第一包会按设备时钟算出缺口长度（event=gap）。 */
+const POLAR_RECONNECT_TRIES = 20;
+function logLinkEvent(dev, ev, detail){
+  const t = Date.now();
+  try{ window.dropLog.push({ t, iso:new Date(t).toISOString(), dev, ev, detail }); }catch(e){}
+  console.warn('[link]', dev, ev, detail||'');
+}
+function setCardNote(name, txt){ const el=document.getElementById('size'+name); if(el) el.textContent=txt; }
+function dropPolarDevice(name){
   UI.removeDeviceCard(name);
   delete obj[name];
   delete streamFlags[name];
-  delete lastPacketDevTime[name];
   recomputeRecordingActive();
   UI.updateStatus();
+}
+async function onDisconnected(event){
+  const name = event.target.name;
+  const o = obj[name];
+  if(o) o.linkGen = (o.linkGen||0) + 1;           // 每断一次加一，重连循环靠它发现「恢复数据流时又断了」
+  if(o && o.reconnectRunning){
+    // 重连循环已经在跑（包括正在恢复数据流的阶段）：只记一笔，由那个循环接着重试，绝不开第二个循环
+    if(!o.reconnecting) logLinkEvent(name, 'disconnect', '恢复数据流时再次断开');
+    o.reconnecting = true;
+    return;
+  }
+  logLinkEvent(name, 'disconnect', '');
+  if(!o || o.closing){ dropPolarDevice(name); return; }
+  o.reconnecting = true;
+  o.reconnectRunning = true;
+  setCardNote(name, UI.t('link.reconnecting'));
+  UI.updateStatus();
+  let ok = false;
+  try{ ok = await polarReconnect(name, o); }
+  finally{ o.reconnectRunning = false; }
+  if(!ok && obj[name] === o){
+    logLinkEvent(name, 'give-up', `${POLAR_RECONNECT_TRIES} 次重连失败`);
+    dropPolarDevice(name);
+  }
+}
+async function polarReconnect(name, o){
+  const t0 = Date.now();
+  for(let attempt=1; attempt<=POLAR_RECONNECT_TRIES; attempt++){
+    await sleep(Math.min(8000, 400*attempt));          // 退避：0.4 s 起，封顶 8 s
+    if(obj[name] !== o || o.closing) return false;
+    setCardNote(name, `${UI.t('link.reconnecting')} ${attempt}/${POLAR_RECONNECT_TRIES}`);
+    try{
+      await pmdAttach(o);
+      const gen = o.linkGen;
+      o.reconnecting = false;
+      // ★ 按设备输出顺序恢复（Verity Sense 要先开 SDK 模式，再开 PPG / ACC），
+      //   每开一路之前重新看 streamFlags：用户在这期间点了停止，被停掉的流不会被重新打开。
+      for(const s of (o.output || [])){
+        if(o.linkGen !== gen) break;
+        if(!(streamFlags[name] && streamFlags[name][s])) continue;
+        await ActivateStream(name, streams[s]);
+        await sleep(120);
+      }
+      if(o.linkGen !== gen || !o.device.gatt.connected) throw new Error('恢复数据流时链路又断了');
+      const restored = (o.output || []).filter(s => streamFlags[name] && streamFlags[name][s]);
+      logLinkEvent(name, 'reconnect', `第 ${attempt} 次成功，缺口 ${((Date.now()-t0)/1000).toFixed(1)} s，恢复 ${restored.join('+')||'无'}`);
+      setCardNote(name, UI.t('link.reconnected'));
+      UI.updateStatus();
+      return true;
+    }catch(e){
+      o.reconnecting = true;
+      console.warn('Polar reconnect', name, attempt, e);
+      try{ if(o.device.gatt.connected) o.device.gatt.disconnect(); }catch(_){}
+    }
+  }
+  return false;
 }
 function GrabTiming(){document.getElementById("confirmed").value=Math.round(dataobject['timing_smooth'].y[dataobject['timing_smooth'].y.length-1]*10)/10;document.getElementById("confirmed_BPM").value=document.getElementById("bpm").innerHTML;}
 function die(str) {throw new Error(str || "Script ended by death");}
 function report(obj){console.log("Obj - ",obj)}
-function printcontrolvalue(event){devicename=event.currentTarget.service.device.name;response=new Uint8Array(event.currentTarget.value.buffer);console.log(devicename, "(timeStamp=",Math.round(event.timeStamp)/1000,") ",Control_Types[response[1]], Stream_Types[response[2]], Device_Errors[response[3]]);}
+function printcontrolvalue(event){
+  const devicename=event.currentTarget.service.device.name;
+  const dv=event.currentTarget.value;
+  const response=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  console.log(devicename, "(timeStamp=",Math.round(event.timeStamp)/1000,") ",Control_Types[response[1]], Stream_Types[response[2]], Device_Errors[response[3]]);
+  // ★ 2026-11：开始/停止测量的应答写进 LINK EVENTS。启动失败（比如 Invalid sample rate）
+  //   以前只在控制台里，CSV 里那一路就是莫名其妙没数据。原始字节一并保留。
+  if(response[0]===0xF0 && (response[1]===2 || response[1]===3)){
+    const hex=Array.from(response,b=>b.toString(16).padStart(2,'0')).join(' ');
+    const cp=BSCore.parsePmdControlResponse(response);
+    // ★ 2026-11：开始测量成功时设备在应答里给出 FACTOR（压缩帧原始计数 → 物理单位的系数），
+    //   按官方 SDK 的规则在 printHeartRate 里乘上。Verity Sense 的 ACC 因此直接是 mG。
+    if(cp.opcode===2 && cp.status===0 && cp.factor!=null){
+      if(!pmdFactor[devicename]) pmdFactor[devicename]={};
+      pmdFactor[devicename][cp.type]=cp.factor;
+    }
+    logLinkEvent(devicename, 'pmd-'+(response[1]===2?'start':'stop'),
+      `${Stream_Types[response[2]]||response[2]} ${Device_Errors[response[3]]||response[3]}`
+      + (cp.factor!=null ? ` factor ${cp.factor}` : '') + ` raw ${hex}`);
+  }
+}
+var pmdFactor = {};   // pmdFactor[dev][type] = 启动应答里的 FACTOR
+var clockGuard = {};  // clockGuard[dev] = BSCore.DeviceClockGuard，一台设备的各路数据共用
 firstTime=0;graph_time=[]; dataoutput='';
 
 function saveCsv(tag, csvString) {
@@ -1069,7 +1617,7 @@ function saveCsv(tag, csvString) {
       : new Date().toISOString()) +
     '_' + tag + '.csv';
 
-  const BOM = '\uFEFF';
+  const BOM = String.fromCharCode(0xFEFF);   // UTF-8 BOM，Excel 才按 UTF-8 读中文
   const blob = new Blob([BOM, csvString], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
 
@@ -1096,7 +1644,7 @@ function downloadData() {
       return;
     }
     for (const g of present){
-      saveCsv(`RAW_${g.key}`, DataObjectToCSV(g.streams));
+      saveCsv(`RAW_${g.key}`, DataObjectToCSV(g.streams, g.key));
     }
   } catch (e) {
     console.error('download failed:', e);
@@ -1291,72 +1839,44 @@ function getFirstTime(dev) {
   if (min == null) min = 0;
   return Math.round(min);
 }
-function getCSVheadings(for_streams){
-  const infoLines = [];
-  const headerChunks = [];
-  for (const dev in dataobject) {
-    const t0    = getFirstTime(dev);
-    const utcMs = (t0 + EPOCH_2000_TO_1970).toFixed(3);
-    infoLines.push(`${dev}: start time(ms-since-2000)=${t0},UTC time(ms-since-1970),${utcMs},SystemStart_UTC_ms,${systemStartUTC[dev]}`);
-    const pieces = ['DevTime_us','unix_dev_ms','unix_host_ms'];
-    for (const s of for_streams) pieces.push(s);
-    headerChunks.push(pieces.join(','));
-  }
-  // Manual export includes full SYNC per-packet:
-  return buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false) + infoLines.join(newline) + newline + headerChunks.join(',') + newline;
-}
-function getCSVdata(for_streams){
+// 手动导出（「导出当前缓冲」）：markers 表 + 元信息 + 该组完整逐包 SYNC + 数据
+function DataObjectToCSV(for_streams, groupKey){
   const NL = newline;
-  const lines = [];
-  let rowIdx = 0;
-  while (true) {
-    let haveData = false;
-    const rowPieces = [];
-    for (const dev in dataobject) {
-      const firstStream = Object.keys(dataobject[dev]).find(s => for_streams.includes(s));
-      if (!firstStream) continue;
-
-      const xFirst = dataobject[dev][firstStream].x;
-      const sensor_us64 = (rowIdx < xFirst.length) ? Math.round(xFirst[rowIdx] * 1000) : '';
-      const unix_ms     = (rowIdx < xFirst.length) ? (xFirst[rowIdx] + EPOCH_2000_TO_1970).toFixed(3) : '';
-      const host_ms     = (rowIdx < xFirst.length) ? hostMs(dev, xFirst[rowIdx]) : '';
-
-      const devPieces = [sensor_us64, unix_ms, host_ms];
-
-      for (const streamName of for_streams) {
-        const yArr = dataobject[dev][streamName]?.y;
-        if (yArr && rowIdx < yArr.length) {
-          devPieces.push(yArr[rowIdx]);
-          haveData = true;
-        } else {
-          devPieces.push('');
-        }
-      }
-      rowPieces.push(devPieces.join(','));
-    }
-    if (!haveData) break;
-    lines.push(rowPieces.join(','));
-    rowIdx++;
-  }
-  return lines.join(NL) + NL + NL;
-}
-function DataObjectToCSV(outputstreams){
-  csv=getCSVmarkers("list_timing");
-  csv+=getCSVheadings(outputstreams);
-  csv+=getCSVdata(outputstreams);
-  return csv;
+  const blocks = exportBlocks(for_streams, null);
+  const filt = groupKey ? groupSyncFilter(groupKey, blocks) : null;
+  const { header, rows } = BSCore.csvDeviceBlocks(blocks, for_streams);
+  return getCSVmarkers("list_timing")
+       + buildMarkerCsvSection() + buildDropCsvSection() + buildSyncCsvSection(false, null, filt)
+       + blocks.map(b=>legacyInfoLine(b.dev)).join(NL) + NL + header + NL
+       + rows.join(NL) + NL + NL;
 }
 
 /* -------- BLE handler -------- */
 function printHeartRate(event){
   var dataTime=Date.now(); // host arrival time for this packet
   var devicename=event.currentTarget.service.device.name;
-  var data=event.target.value.buffer;
-  var devicetime=Number(new BigInt64Array(data.slice(1,9))[0])/1000000;
-  var DataType = Number(new Uint8Array(data.slice(0,1)));
-
+  const dv=event.target.value;
+  const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  // ★ 2026-11：解包全部交给 BSCore.parsePmdPacket（见文件头部的纯函数块，tests/ 有合成包测试）。
+  //   修掉的问题：增量帧里恰好等于 -2^(位宽-1) 的增量被当成正数（之后整包累加全错）；
+  //   奇数位宽解不对；按字节数而不是样本数切块会多出假样本；ECG 只读了 3 字节里的低 2 字节。
+  let pk;
+  try{ pk=BSCore.parsePmdPacket(u8); }catch(e){ console.warn('PMD parse', devicename, e); return; }
+  var DataType=pk.type;
   const streamName = (DataType==1 ? 'PPG' : (DataType==0 ? 'ECG' : 'ACC'));
+  // ★ 2026-11：设备时钟大幅跳变（重启后 RTC 回到出厂时刻、被别的 App 对表）时，以到达时刻为参照
+  //   把设备时间接回主机时间轴，之后这台设备的 DevTime_us / unix_dev_ms 都是接回后的值（见 BSCore.DeviceClockGuard）。
+  if(!clockGuard[devicename]) clockGuard[devicename]=new BSCore.DeviceClockGuard();
+  const cg=clockGuard[devicename].map(DataType, pk.devMs, dataTime);
+  if(cg.event) logLinkEvent(devicename, 'clock-jump', `${streamName} 设备钟跳了 ${(cg.jumpMs/1000).toFixed(1)} s，已按到达时刻接上`);
+  var devicetime=cg.devMs;
   pushSyncPair(devicename, streamName, devicetime, dataTime);
+  // 截断的包不知道丢了哪几个样本，没法把剩下的对到正确时刻：整包丢弃并记下来（官方 SDK 也是丢弃）。
+  // 不更新 lastPacketDevTime，下一包会按设备时钟算出这段缺口。
+  if(pk.truncated){ logLinkEvent(devicename, 'truncated', `${streamName} ${u8.length} B`); return; }
+  if(!pk.supported || !pk.channels.length || !pk.channels[0].length) return;
+  // 压缩帧乘设备给的 FACTOR（规则见 BSCore.applyPmdFactor）；没收到 FACTOR 时保持原始计数
+  pk.channels = BSCore.applyPmdFactor(pk, pmdFactor[devicename]?.[DataType]);
 
   updatecombined[devicename]=true;
   if(!(devicename in intime)){intime[devicename]=devicetime;}
@@ -1367,28 +1887,22 @@ function printHeartRate(event){
   }
 
   if (DataType == 2){
-    frame_type=Number(new Uint8Array(data.slice(9,10)));resolution=(frame_type+1)*8;step=resolution/8;
-    if(frame_type==1){
-      samples = new Int16Array(data.slice(10,))
-      npoints=samples.byteLength/2;
-      ACC=createArray(npoints,3);
-      for(offset=0;offset<npoints;offset+=3){i=offset/3;ACC[0][i]=samples[offset];ACC[1][i]=samples[offset+1];ACC[2][i]=samples[offset+2];}
-      ACCtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,ACC[0].length,acc_timestep);
-    }else{
-      ACC=completeDeltaFrame(data,3,2);
-      ACCtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,ACC[0].length,(1000/Sense_rate));
-      ACC.push([]);
-    }
-    for(i=0;i<ACC[0].length;i++){ACC[3][i]=Math.round(Math.sqrt(ACC[0][i]**2+ACC[1][i]**2+ACC[2][i]**2)/16*200);}
-    pushData(devicename,['acc_x','acc_y','acc_z','acc_v'],ACCtime,ACC)
+    const [ax,ay,az]=pk.channels;
+    // H10 发未压缩帧（标称 200 Hz，已是 mG），Verity Sense 发压缩帧（标称 416 Hz，乘 FACTOR 后是 mG）
+    const nominal = pk.compressed ? (1000/Sense_rate) : acc_timestep;
+    const ACCtime=fillTimeArray(DataType,devicename,devicetime,dataTime,ax.length,nominal);
+    if(!ACCtime) return;
+    // ★ 2026-11：acc_v 原来是 |a|/16*200（= 12.5×|a|），和文档写的 √(x²+y²+z²) 对不上，
+    //   在 H10 卡片 ±2000 的纵轴上也画不出来。现在就是合向量，单位同 acc_x/y/z（H10 为 mG）。
+    const av=ax.map((_,i)=>Math.round(Math.hypot(ax[i],ay[i],az[i])));
+    pushData(devicename,['acc_x','acc_y','acc_z','acc_v'],ACCtime,[ax,ay,az,av]);
     resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/(COMBINED_H-100);
     ReduceOld(devicename,dataobject,'acc_v','acc_v_reduced',resolution);
   }
   if (DataType == 0){
-    samples = new Uint8Array(data.slice(10,))
-    npoints=samples.byteLength/3; ECGdata=createArray(npoints);
-    for(offset=0;offset<samples.byteLength;offset+=3){i=offset/3;ECGdata[i]=WordstoSignedInteger(samples.slice(offset,offset+2),8);}
-    ECGtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,npoints,ecg_timestep);
+    const ECGdata=pk.channels[0];                 // µV
+    const ECGtime=fillTimeArray(DataType,devicename,devicetime,dataTime,ECGdata.length,ecg_timestep);
+    if(!ECGtime) return;
     pushData(devicename,['ECG'],ECGtime,[ECGdata]);
     resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/(COMBINED_H-100);
     Reduce(devicename,dataobject,'ECG','ECG_reduced',resolution);
@@ -1397,10 +1911,11 @@ function printHeartRate(event){
   if(DataType == 1){
     PPGsum=[];PPGsumfilter=[];
     if(!(devicename in last_incom)){last_incom[devicename]=0;last_filter[devicename]=0;}
-    NewPPG=completeDeltaFrame(data,4,3);
+    const NewPPG=pk.channels;
     npoints=NewPPG[0].length;
     for (i=0;i<npoints;i++){PPGsum[i]=NewPPG[0][i]+NewPPG[1][i]+NewPPG[2][i]}
-    PPGtime=fillTimeArray(DataType,devicename,data.slice(1,9),dataTime,npoints,1000/samplerate);
+    const PPGtime=fillTimeArray(DataType,devicename,devicetime,dataTime,npoints,1000/samplerate);
+    if(!PPGtime) return;
 
     pushData(devicename, PPG_CHANNEL_NAMES, PPGtime, NewPPG);
 
@@ -1460,7 +1975,9 @@ function updateGraphs() {
                    'EDA_G','EDA_SCL','GSR_uS'];
       lines=[];
       for(id in trace){if(linestoplot.includes(id)){lines.push(trace[id])}};
-      Plotly.react(graphname,lines,layoutCombined[key]);
+      // ★ 2026-11：离线打开时 Plotly 没加载，这里原来每 200 ms 抛一次 ReferenceError，
+      //   连带下面的同步表也不刷新了。没有图形库就只跳过画图。
+      if(typeof Plotly!=='undefined') Plotly.react(graphname,lines,layoutCombined[key]);
       updatecombined[key]=false;
     }
   }
@@ -1508,170 +2025,15 @@ devices.GSR     = { type:'GSR',     output:['GSR'] };
 streams.EDA = { name:'EDA', id:100, type:'Electrodermal activity', code_start:[] };
 streams.GSR = { name:'GSR', id:101, type:'Galvanic skin response', code_start:[] };
 
-/* ---------------- COBS ---------------- */
-function cobsDecode(buf){                       // 入参不含结尾 0x00
-  const out=[]; let i=0;
-  while(i<buf.length){
-    const code=buf[i]; if(code===0) break;
-    i++;
-    for(let k=0;k<code-1 && i<buf.length;k++) out.push(buf[i++]);
-    if(code!==0xFF && i<buf.length) out.push(0);
-  }
-  return Uint8Array.from(out);
-}
-function cobsEncode(buf){                       // 返回 [code][data...] 0x00
-  const out=[0]; let codeIdx=0, code=1;
-  for(let i=0;i<buf.length;i++){
-    if(buf[i]===0){ out[codeIdx]=code; codeIdx=out.length; out.push(0); code=1; }
-    else{ out.push(buf[i]); code++;
-          if(code===0xFF){ out[codeIdx]=code; codeIdx=out.length; out.push(0); code=1; } }
-  }
-  out[codeIdx]=code;
-  out.push(0);
-  return Uint8Array.from(out);
-}
-
-/* ---------------- 极简 protobuf ----------------
-   只覆盖本设备用到的两个消息，避免为了 3 个字段引进 200KB 的 google-protobuf。
-   EdaBuffer { repeated Impedance data = 1; Timestamp timestamp = 2; }
-   Impedance { float real = 1; float imag = 2; }
-   Timestamp { uint64 time = 1; uint32 us = 2; }                              */
-function pbVarint(u8,p){ let v=0,s=0,b; do{ b=u8[p.i++]; v+=(b&0x7f)*Math.pow(2,s); s+=7; }while(b>=0x80); return v; }
-function pbParseEdaBuffer(u8){
-  const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
-  const p={i:0}; const imp=[]; let t_s=0,t_us=0;
-  while(p.i<u8.length){
-    const key=pbVarint(u8,p), field=key>>>3, wire=key&7;
-    if(wire!==2){ if(wire===0) pbVarint(u8,p); else if(wire===5) p.i+=4; else if(wire===1) p.i+=8; else break; continue; }
-    const len=pbVarint(u8,p), end=p.i+len;
-    if(field===1){                                   // Impedance
-      let re=0,im=0;
-      while(p.i<end){
-        const k2=pbVarint(u8,p), f2=k2>>>3, w2=k2&7;
-        if(w2===5){ const v=dv.getFloat32(p.i,true); p.i+=4; if(f2===1) re=v; else if(f2===2) im=v; }
-        else if(w2===0) pbVarint(u8,p);
-        else if(w2===2){ const l2=pbVarint(u8,p); p.i+=l2; }
-        else break;
-      }
-      imp.push({re,im});
-    } else if(field===2){                            // Timestamp
-      while(p.i<end){
-        const k2=pbVarint(u8,p), f2=k2>>>3, w2=k2&7;
-        if(w2===0){ const v=pbVarint(u8,p); if(f2===1) t_s=v; else if(f2===2) t_us=v; }
-        else if(w2===2){ const l2=pbVarint(u8,p); p.i+=l2; }
-        else if(w2===5) p.i+=4; else break;
-      }
-    }
-    p.i=end;
-  }
-  return { imp, t_s, t_us };
-}
-function pbEncodeTimestamp(sec,us){
-  const out=[];
-  const varint=(n)=>{ while(n>127){ out.push((n&0x7f)|0x80); n=Math.floor(n/128); } out.push(n); };
-  out.push(0x08); varint(sec);
-  out.push(0x10); varint(us);
-  return Uint8Array.from(out);
-}
-
-/* ---------------- Nyquist 圆拟合 ----------------
-   16 个频点的复阻抗在复平面上应落在一段圆弧上（Cole 模型）。厂商上位机用
-   JSXGraph 的矩阵运算做最小二乘拟合圆，这里用纯 JS 解同一个方程，省掉 700KB 依赖：
-       min_z ||M z - y||²,  M 行 = [x, y, 1],  y = x²+y²
-       解 (MᵀM) z = Mᵀy  →  xm=z0/2, ym=z1/2, r=√(z2+xm²+ym²)
-   另加一个厂商没有的 cfit = 16 点到拟合圆的 RMS 残差 / 半径：
-   这是接触质量的硬指标。接触好时 16 点规整落在弧上（cfit 小，通常 <0.1）；
-   接触不良时是一团散点，拟合圆没有物理意义（cfit 大）。 */
-function fitCircle(pts){
-  const n = pts.length;
-  if(n < 3) return null;
-  let Sxx=0,Sxy=0,Sx=0,Syy=0,Sy=0,S1=0,Bx=0,By=0,B1=0;
-  for(const q of pts){
-    const x=q.re, y=q.im, w=x*x+y*y;
-    Sxx+=x*x; Sxy+=x*y; Sx+=x; Syy+=y*y; Sy+=y; S1+=1;
-    Bx+=x*w; By+=y*w; B1+=w;
-  }
-  const A=[[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,S1]], b=[Bx,By,B1];
-  for(let i=0;i<3;i++){
-    let piv=i;
-    for(let k=i+1;k<3;k++) if(Math.abs(A[k][i])>Math.abs(A[piv][i])) piv=k;
-    if(Math.abs(A[piv][i])<1e-12) return null;
-    const ta=A[i]; A[i]=A[piv]; A[piv]=ta;
-    const tb=b[i]; b[i]=b[piv]; b[piv]=tb;
-    for(let k=i+1;k<3;k++){
-      const f=A[k][i]/A[i][i];
-      for(let j=i;j<3;j++) A[k][j]-=f*A[i][j];
-      b[k]-=f*b[i];
-    }
-  }
-  const z=[0,0,0];
-  for(let i=2;i>=0;i--){
-    let t=b[i];
-    for(let j=i+1;j<3;j++) t-=A[i][j]*z[j];
-    z[i]=t/A[i][i];
-  }
-  const xm=z[0]*0.5, ym=z[1]*0.5, rr=z[2]+xm*xm+ym*ym;
-  if(!(rr>0)) return null;
-  const r=Math.sqrt(rr);
-  let se=0;
-  for(const q of pts){ const d=Math.hypot(q.re-xm,q.im-ym)-r; se+=d*d; }
-  return { cx:xm, cy:ym, r, cfit:Math.sqrt(se/n)/r };
-}
+/* ---------------- COBS / protobuf / Nyquist 圆拟合 ----------------
+   实现搬到了文件头部的 BSCore（纯函数，tests/ 里有往返测试），这里只保留原来的名字。
+   帧格式见 README「Protocol」一节；cfit = 16 点到拟合圆的 RMS 残差 / 半径，接触好时 < 0.1。 */
+const { cobsDecode, cobsEncode, pbVarint, pbParseEdaBuffer, pbEncodeTimestamp, fitCircle } = BSCore;
 
 /* ---------------- SCL / SCR 处理 ----------------
-   与厂商上位机同口径：取 12 Hz 一路算电导，指数平滑分出 tonic(SCL) / phasic(SCR)。 */
-class EdaProc{
-  constructor(fs=8,alpha=0.04,thr=0.02,minGap=2.0){
-    this.fs=fs; this.a=alpha; this.thr=thr; this.gap=minGap;
-    this.scl=null; this.hist=[]; this.lastPeak=-1e9; this.g=[];
-    this.deint=true; this.prevG=null;
-    this.peakT=[]; this.peakA=[];        // 60 秒滑窗内的峰 → SCR/min 与厂商 arousal
-  }
-  update(t,imp){
-    const z=imp[0]||{re:0,im:0};
-    const mag=Math.hypot(z.re,z.im);
-    const Graw = mag<1e-9 ? 0 : 1e6/mag;                     // 西门子→µS
-    /* 去交替：设备在两组激励之间轮流测，12Hz 这一路天生逐样本 2:1 跳，
-       和电极贴得好不好无关（2026-09-03 实测：28–108Hz 各频点 lag-1 达 -0.9）。
-       长度 2 的滑动平均正好在 Nyquist 处开零点，把这个分量精确抵消：
-       实测 lag-1 -0.358 → +0.742，std 8.84 → 5.02。
-       中值 3 处理不了 2 相交织（实测反而恶化到 -0.520），别用。
-       只影响 SCL/SCR/波形；EDA_G_raw 和 16 频点原始阻抗照原样进 CSV。 */
-    let G = Graw;
-    if(this.deint && this.prevG!==null) G = (Graw + this.prevG) / 2;
-    this.prevG = Graw;
-    this.scl = (this.scl===null) ? G : this.a*G+(1-this.a)*this.scl;
-    const scr = G-this.scl;
-    /* 峰检测：局部极大 + 幅度阈值 + 最小间隔 */
-    this.hist.push({t,v:scr}); if(this.hist.length>this.fs*3) this.hist.shift();
-    let peak=false;
-    if(this.hist.length>=3){
-      const n=this.hist.length, c=this.hist[n-2];
-      if(c.v>this.hist[n-3].v && c.v>=this.hist[n-1].v && c.v>=this.thr && (c.t-this.lastPeak)>=this.gap){
-        this.lastPeak=c.t; peak=true;
-        this.peakT.push(c.t); this.peakA.push(c.v);
-      }
-    }
-    /* 60 秒滑窗 → SCR/min。厂商 arousal = min(100, 峰频×15 + 平均幅度×200)，
-       是厂商自编的启发式、无文献依据，导出只为和他们的上位机对得上，勿用于发表。 */
-    while(this.peakT.length && t-this.peakT[0]>60){ this.peakT.shift(); this.peakA.shift(); }
-    const scrPerMin=this.peakT.length;
-    const meanAmp=this.peakA.length ? this.peakA.reduce((a,b)=>a+b,0)/this.peakA.length : 0;
-    const arousal=this.peakA.length ? Math.round(Math.min(100, scrPerMin*15+meanAmp*200)) : 0;
-    /* 信号质量：动态范围 + 接触阻抗 + 噪声 */
-    this.g.push(G); if(this.g.length>this.fs*4) this.g.shift();
-    let sqi=0;
-    if(this.g.length>=8){
-      const mn=Math.min(...this.g), mx=Math.max(...this.g);
-      sqi += Math.min(40,(mx-mn)*400);
-      const mean=this.g.reduce((a,b)=>a+b,0)/this.g.length;
-      const sd=Math.sqrt(this.g.reduce((s,v)=>s+(v-mean)**2,0)/this.g.length);
-      sqi += Math.min(30,Math.max(0,30-sd*60));
-    }
-    sqi += (mag>1000&&mag<1e7) ? 30 : (mag>0?15:0);
-    return { G, Graw, scl:this.scl, scr, peak, scrPerMin, arousal, sqi:Math.round(Math.min(100,sqi)) };
-  }
-}
+   与厂商上位机同口径（12 Hz 电导、2 点平均去交替、α=0.04 指数平滑、0.02 µS / 2 s 峰检测），
+   实现见 BSCore.EdaProc。 */
+const EdaProc = BSCore.EdaProc;
 
 /* ---------------- 只给绘图 trace 留滚动窗口，dataobject 仍保留全量 ---------------- */
 function trimTraces(name, ids, max){
@@ -1743,9 +2105,9 @@ const EDA = (function(){
 const state = {};   // state[name] = {device,server,txChar,rxChar,batChar,buf,proc,notifying}
 
 async function connect(){
+  if(!navigator.bluetooth){ alert(UI.t('err.nobt')); return; }
   const btn=document.getElementById('btnEDA'); if(btn) btn.disabled=true;
   try{
-    if(!navigator.bluetooth) throw new Error('这个浏览器没有 Web Bluetooth，请用 Chrome / Edge');
     const device = await navigator.bluetooth.requestDevice({
       filters: EDA_NAME_PREFIXES.map(p=>({namePrefix:p})),
       optionalServices:[EDA_NUS,'device_information','battery_service']
@@ -1930,11 +2292,7 @@ async function onEdaDisconnected(event){
   }
 }
 
-function logLink(dev, ev, detail){
-  const t = Date.now();
-  try{ window.dropLog.push({ t, iso:new Date(t).toISOString(), dev, ev, detail }); }catch(e){}
-  console.warn('[EDA link]', dev, ev, detail);
-}
+function logLink(dev, ev, detail){ logLinkEvent(dev, ev, detail); }
 function markCardState(name, txt){
   const el = document.getElementById('size'+name);
   if(el) el.textContent = txt;
@@ -1991,17 +2349,12 @@ const state = {};   // state[name] = {port, reader, running, t0sys, t0dev, adcMa
      既翻了方向又留在公式的定义域内。
    注意：这块模块没有校准，µS 的绝对值别当真，只能当相对唤醒指标用；
      GSR_raw 永远是原始 ADC，不受这个开关影响。 */
-function toOhm(v10, flip){
-  let v = flip ? (511 - v10) : v10;
-  if(v < 0) v = 0;
-  if(v >= 511) return null;
-  return ((1024 + 2*v) * 10000) / (512 - v);
-}
+const toOhm = BSCore.gsrToOhm;
 
 async function connect(){
+  if(!navigator.serial){ alert(UI.t('err.noserial')); return; }
   const btn=document.getElementById('btnGSR'); if(btn) btn.disabled=true;
   try{
-    if(!navigator.serial) throw new Error('这个浏览器没有 Web Serial，请用 Chrome / Edge，并从 https 或本地文件打开');
     const port = await navigator.serial.requestPort();
     const baud = parseInt(document.getElementById('gsrBaud')?.value || '115200',10);
     await port.open({ baudRate: baud });
@@ -2037,7 +2390,7 @@ async function startStream(name){
      整条 GSR 时间轴就恒定超前那段间隔（实录里是 -19142 ms）。
      修法：开录后先丢掉 400 ms 内的所有行（积压在内存里，瞬间就排空了），
      再用之后到达的第一行做锚点。10 Hz 下只损失 4 个样本。 */
-  S.running=true; S.t0sys=null; S.t0dev=null;
+  S.running=true; S.clock=null;
   S.primeUntil = Date.now() + 400;
   const b=document.getElementById(name+'GSR'); if(b) b.checked=true;
   setStreamFlag(name,'GSR',true);
@@ -2080,25 +2433,21 @@ async function readLoop(name){
 function handleLine(name,line,arrival){
   const S=state[name];
   if(S.primeUntil && arrival < S.primeUntil) return;      // 排空积压
-  const parts=line.split(/[,\s;]+/).map(Number).filter(v=>isFinite(v));
-  if(!parts.length) return;
+  const rec=BSCore.parseGsrLine(line);
+  if(!rec) return;
+  const devMillis=rec.millis, adc=rec.adc;
 
-  let devMillis=null, adc=null;
-  if(parts.length>=2){ devMillis=parts[0]; adc=parts[1]; }
-  else { adc=parts[0]; }
-
-  /* 时间轴：有 millis 就用它保持采样间隔平滑，只用首样本对一次系统时钟 */
+  /* 时间轴：有 millis 就用它保持采样间隔平滑，只用首样本对一次系统时钟。
+     ★ 2026-11 修：原来任何一行和墙钟差过 2 s 就把锚点挪到这一行的到达时刻。主线程卡顿
+     2 s 以上时（上面天琴座重连注释里说的掉线就是这么来的），积压的那一阵行全部「迟到」，
+     锚点被挪到迟到的时刻，之后整条 GSR 时间轴留下永久偏移（合成测试里 3 s 卡顿留下 900 ms）。现在用
+     BSCore.SerialClock 平滑跟踪板子时钟漂移，卡顿不影响，时间轴单调；只有板子复位才重锚（event=reanchor）。 */
   let devMs;
   if(devMillis!=null){
-    if(S.t0dev===null){ S.t0dev=devMillis; S.t0sys=arrival; }
-    devMs = (S.t0sys + (devMillis - S.t0dev)) - EPOCH_2000_TO_1970;
-    /* 兜底：板子中途复位、或积压比 prime 窗口还长时，millis 与墙钟会整体偏掉。
-       偏过 2 秒就重新锚一次，避免整条时间轴带着固定误差走完全程。 */
-    if(Math.abs((devMs + EPOCH_2000_TO_1970) - arrival) > 2000){
-      S.t0dev=devMillis; S.t0sys=arrival;
-      devMs = arrival - EPOCH_2000_TO_1970;
-      console.warn('GSR 时间轴重新锚定（板子复位或串口积压）');
-    }
+    if(!S.clock) S.clock=new BSCore.SerialClock();
+    const m=S.clock.map(devMillis, arrival);
+    devMs = m.hostMs - EPOCH_2000_TO_1970;
+    if(m.event) logLinkEvent(name, 'reanchor', m.event);
   } else {
     devMs = arrival - EPOCH_2000_TO_1970;
   }
@@ -2178,7 +2527,17 @@ const I18N = {
     'dev.bat':'电量','dev.eda.read':'电导 / 质量','dev.gsr.read':'电导 / 原始值','dev.deint':'去交替（2点平均）','dev.nyq':'Nyquist 16 频点 · 接触自检','dev.drops':'掉线',
     'dev.samples':'样本','dev.rate':'实测率','dev.gain':'纵轴增益','dev.live':'采集中',
     'confirm.clear':'确定清空内存里已采集的全部数据？这一步不可撤销，已经落盘的文件不受影响。',
-    'sync.th.dev':'设备 / 流','sync.th.skew':'skew','sync.th.jm':'抖动中位','sync.th.j95':'抖动 p95'
+    'sync.th.dev':'设备 / 流','sync.th.skew':'skew','sync.th.jm':'抖动中位','sync.th.j95':'抖动 p95',
+    'compat.nobt':'这个浏览器不支持 Web Bluetooth：Polar H10 / Verity Sense 和天琴座都连不上。请用电脑上的新版 Chrome 或 Edge 打开本文件（Firefox、Safari、iPhone 上的所有浏览器都不行）。',
+    'compat.noserial':'这个浏览器不支持 Web Serial：串口 GSR（Arduino）连不上。',
+    'compat.nofs':'这个浏览器不支持写入文件夹：「选择输出文件夹」不可用，只能靠浏览器下载保存。',
+    'compat.noadapter':'浏览器没有找到可用的蓝牙适配器，或系统蓝牙已关闭。Linux 版 Chrome 可能还要在 chrome://flags 打开 Experimental Web Platform features。',
+    'compat.insecure':'页面不是从 https 或本地文件打开的，浏览器会禁用蓝牙和串口。',
+    'err.nobt':'这个浏览器不支持 Web Bluetooth，没法连接蓝牙传感器。请用电脑上的新版 Chrome 或 Edge 打开本文件。',
+    'err.noserial':'这个浏览器不支持 Web Serial，没法连接串口 GSR。请用电脑上的新版 Chrome 或 Edge 打开本文件。',
+    'err.polarModel':'不支持的 Polar 型号：{name}。目前只支持 H10 和 Verity Sense。',
+    'err.connect':'Polar 连接失败：',
+    'link.reconnecting':'掉线，重连中…','link.reconnected':'已重连'
   },
   en:{
     'app.name':'Polar Console','theme.light':'Light','theme.dark':'Dark',
@@ -2214,7 +2573,17 @@ const I18N = {
     'dev.bat':'Battery','dev.eda.read':'Conductance / quality','dev.gsr.read':'Conductance / raw','dev.deint':'De-alternate (2-pt mean)','dev.nyq':'Nyquist 16 freqs · contact check','dev.drops':'drops',
     'dev.samples':'Samples','dev.rate':'Actual rate','dev.gain':'Y gain','dev.live':'live',
     'confirm.clear':'Discard every sample collected in memory? This cannot be undone. Files already written to disk are unaffected.',
-    'sync.th.dev':'Device / stream','sync.th.skew':'skew','sync.th.jm':'jitter med','sync.th.j95':'jitter p95'
+    'sync.th.dev':'Device / stream','sync.th.skew':'skew','sync.th.jm':'jitter med','sync.th.j95':'jitter p95',
+    'compat.nobt':'This browser has no Web Bluetooth, so Polar H10 / Verity Sense and the Lyra EDA sensor cannot connect. Open this file in a recent desktop Chrome or Edge (Firefox, Safari and every browser on iPhone lack it).',
+    'compat.noserial':'This browser has no Web Serial, so the serial GSR board (Arduino) cannot connect.',
+    'compat.nofs':'This browser cannot write to a folder: "Choose output folder" is unavailable and data can only be saved as browser downloads.',
+    'compat.noadapter':'The browser found no usable Bluetooth adapter, or Bluetooth is switched off. Chrome on Linux may also need Experimental Web Platform features enabled in chrome://flags.',
+    'compat.insecure':'This page was not opened over https or from a local file, so the browser disables Bluetooth and serial access.',
+    'err.nobt':'This browser has no Web Bluetooth, so it cannot connect to Bluetooth sensors. Open this file in a recent desktop Chrome or Edge.',
+    'err.noserial':'This browser has no Web Serial, so it cannot connect to the serial GSR board. Open this file in a recent desktop Chrome or Edge.',
+    'err.polarModel':'Unsupported Polar model: {name}. Only H10 and Verity Sense are supported.',
+    'err.connect':'Polar connection failed: ',
+    'link.reconnecting':'Disconnected, reconnecting…','link.reconnected':'Reconnected'
   }
 };
 
@@ -2230,7 +2599,35 @@ function applyI18n(){
   });
   document.getElementById('lgZh').setAttribute('aria-pressed', lang==='zh');
   document.getElementById('lgEn').setAttribute('aria-pressed', lang==='en');
-  rebuildAllCards(); renderSyncPanel(); updateStatus();
+  rebuildAllCards(); renderSyncPanel(); updateStatus(); renderCompat();
+}
+
+/* ---------- 浏览器能力自检 ---------- */
+const compat = { checked:false, secure:true, bt:false, serial:false, fs:false, adapter:null };
+function checkCompat(){
+  compat.secure = window.isSecureContext !== false;
+  compat.bt     = !!navigator.bluetooth;
+  compat.serial = !!navigator.serial;
+  compat.fs     = typeof window.showDirectoryPicker === 'function';
+  compat.checked = true;
+  if (compat.bt && typeof navigator.bluetooth.getAvailability === 'function'){
+    navigator.bluetooth.getAvailability().then(v=>{ compat.adapter = !!v; renderCompat(); }).catch(()=>{});
+  }
+  renderCompat();
+  return compat;
+}
+function renderCompat(){
+  const el = document.getElementById('compatBanner');
+  if (!el || !compat.checked) return;
+  const keys = [];
+  if (!compat.secure) keys.push('compat.insecure');
+  if (!compat.bt) keys.push('compat.nobt');
+  else if (compat.adapter === false) keys.push('compat.noadapter');
+  if (!compat.serial) keys.push('compat.noserial');
+  if (!compat.fs) keys.push('compat.nofs');
+  el.textContent = '';
+  for (const k of keys){ const d = document.createElement('div'); d.dataset.key = k; d.textContent = t(k); el.appendChild(d); }
+  el.classList.toggle('show', keys.length > 0);
 }
 
 /* ---------- theme ---------- */
@@ -2488,6 +2885,7 @@ function wrapAutosaveCounter(){
 
 /* ---------- boot ---------- */
 function boot(){
+  checkCompat();
   setTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   applyI18n();
   wrapAutosaveCounter();
@@ -2497,7 +2895,8 @@ function boot(){
 
 return { setLang(x){ lang=x; applyI18n(); }, setTheme, toggleRecord, confirmClear,
          onStreamToggle, buildDeviceCard, removeDeviceCard, rebuildAllCards, syncTable, updateStatus, boot,
-         t, get fileCount(){return fileCount;}, set fileCount(v){fileCount=v;} };
+         t, checkCompat, get compat(){return {...compat};},
+         get fileCount(){return fileCount;}, set fileCount(v){fileCount=v;} };
 })();
 
 </script>
