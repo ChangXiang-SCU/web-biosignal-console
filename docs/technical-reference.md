@@ -37,7 +37,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 | 服务 UUID  | fb005c80-02e7-f387-1cad-8acd2d8df0c8 | PMD Service                    |
 | R 波检出   | 平均 +3 SD 阈值 + 300 ms 不应期      | 本文分析脚本所用，非采集端处理 |
 
-> *包边界时间戳修正：每个 PMD 包的设备时间戳属于包内最后一个样本（与 Polar 官方 SDK 同一规则）。Polar 设备实际 ODR 未必等于标称值，本系统用相邻两包设备时间戳之差除以包内样本数得到真实采样间隔；首包用标称值，丢包或时间戳异常时沿用上一次采信的间隔。实测 H10 加速度计每包 36 样本、设备时间戳只前进 177.65 ms（真实 4.935 ms/样本 ≈ 202.6 Hz，而非标称 5 ms/200 Hz）；写死标称值会让时间轴累计走快约 1.3%。*
+> *包边界时间戳修正：每个 PMD 包的设备时间戳属于包内最后一个样本（与 Polar 官方 SDK 同一规则）。Polar 设备实际 ODR 未必等于标称值，本系统用相邻两包设备时间戳之差除以包内样本数得到真实采样间隔；首包用标称值，丢包时沿用上一次采信的间隔；设备时间倒退或重复的包整包丢弃，时间轴始终单调。设备重启后 RTC 回到出厂时刻、或被别的 App 对表时，设备时钟会整段跳走，系统以包到达时刻为参照检测（偏离超过 30 s），从那一包起把设备时间接回主机时间轴，并在 LINK EVENTS 记 clock-jump。实测 H10 加速度计每包 36 样本、设备时间戳只前进 177.65 ms（真实 4.935 ms/样本 ≈ 202.6 Hz，而非标称 5 ms/200 Hz）；写死标称值会让时间轴累计走快约 1.3%。*
 
 三、天琴座 Lyra 皮肤电 · 这台设备到底是什么
 
@@ -254,7 +254,7 @@ Polar H10 心电 + 天琴座 Lyra 皮肤电 + Arduino GSR
 
 - MARKERS 段：实验事件标记，用 unix_host_ms 同一根时间轴，可直接与数据行对齐
 
-- LINK EVENTS 段：掉线、重连、丢包缺口（gap）、串口重锚（reanchor）、Polar 启停应答（pmd-start/pmd-stop），数据缺口可追溯
+- LINK EVENTS 段：掉线、重连、丢包缺口（gap）、设备时钟异常（clock-backwards / clock-irregular / clock-jump）、截断包（truncated）、串口重锚（reanchor）、Polar 启停应答（pmd-start/pmd-stop，含 FACTOR），数据缺口可追溯
 
 - SYNC summary 段：每台设备每条流的 offset、skew、延迟中位数、抖动中位数与 p95
 
