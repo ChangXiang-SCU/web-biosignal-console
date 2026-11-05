@@ -16,7 +16,7 @@ No install, no drivers, no Python runtime. Double-click it in Chrome or Edge and
 | Polar H10 chest strap | ECG (`_ECG`) | Web Bluetooth, Polar PMD | 130 Hz | 129.4–129.9 Hz | µV |
 | Polar H10 chest strap | ACC (`_ACC`) | Web Bluetooth, Polar PMD | 200 Hz, ±4 g, 16 bit | ~202.6 Hz | mG |
 | Polar Verity Sense | PPG (`_PPG`) | Web Bluetooth, Polar PMD | 176 Hz | not re-measured | raw counts |
-| Polar Verity Sense | ACC (`_ACC`) | Web Bluetooth, Polar PMD | 416 Hz | not re-measured | raw counts, see limitations |
+| Polar Verity Sense | ACC (`_ACC`) | Web Bluetooth, Polar PMD | 416 Hz | not re-measured | mG (device FACTOR applied) |
 | Lyra / **Nervous EDA** (16-frequency impedance spectroscopy) | EDA (`_EDA`), spectrum (`_EDAZ`) | Web Bluetooth, Nordic UART | 8 Hz | 8.001 Hz | µS / Ω |
 | Arduino Uno/Nano + analog GSR module | GSR (`_GSR`) | Web Serial (CH340) | 10 Hz | 10.00 Hz | ADC counts / µS (uncalibrated) |
 
@@ -167,15 +167,16 @@ For Polar streams, the device timestamp of each BLE packet belongs to its **last
 earlier samples are spaced by the measured interval (packet-to-packet device time ÷ samples),
 which tracks the real output rate instead of the nominal one. `host_offset_ms` is fixed at the
 first sample of each device: host arrival time minus device time, so it includes one transport
-latency. For GSR the Arduino `millis()` keeps sample spacing exact and the first line anchors it
-to the host clock.
+latency. For GSR, `unix_host_ms = millis + θ`, where θ follows the smallest `arrival − millis` seen
+in the last 30 s, changing by at most 1 % of elapsed time: host stalls do not move it, Arduino
+clock drift is tracked smoothly, and the time axis never steps backwards.
 
 ### Signal columns
 
 | Group | Column | Unit | Meaning |
 |---|---|---|---|
 | `_ECG` | `ECG` | µV | single-lead ECG, unfiltered (Polar PMD spec: frame type 0, 3 bytes per sample) |
-| `_ACC` | `acc_x`, `acc_y`, `acc_z` | mG (H10) | accelerometer axes |
+| `_ACC` | `acc_x`, `acc_y`, `acc_z` | mG | accelerometer axes. H10 sends mG directly; Verity Sense sends compressed counts that are multiplied by the FACTOR from its start response |
 | `_ACC` | `acc_v` | same as axes | magnitude √(x²+y²+z²); ≈1000 at rest on an H10 |
 | `_PPG` | `PPG0`, `PPG1`, `PPG2`, `ambient` | raw counts | Verity Sense optical channels |
 | `_PPG` | `PPGsum` | raw counts | PPG0+PPG1+PPG2 after a 0.2 s high-pass filter (display signal, not raw) |
@@ -198,12 +199,14 @@ to the host clock.
 | `event` | Meaning |
 |---|---|
 | `disconnect` | the BLE link dropped |
-| `reconnect` | reconnected; `detail` gives the attempt number, the gap length and the streams restarted |
+| `reconnect` | reconnected and the streams restarted (in device order, skipping any the user stopped meanwhile); `detail` gives the attempt number and the gap length. A drop during the restart is logged as a second `disconnect` and handled by the same retry loop |
 | `give-up` | 20 reconnect attempts failed; the device card is removed, data recorded so far is kept |
 | `gap` | a Polar stream skipped samples (`detail`: stream and missing milliseconds, from the device clock) |
-| `clock-backwards` | a Polar packet's device time went backwards; nominal spacing used |
-| `reanchor` | the serial GSR time axis was re-anchored (`reset`: board rebooted; `slow` / `early`: Arduino clock drifted more than 2 s) |
-| `pmd-start`, `pmd-stop` | Polar's answer to a start/stop command, with the raw response bytes (a failed start shows up here) |
+| `clock-backwards` | a Polar packet's device time did not advance; the last accepted sample spacing is reused |
+| `clock-irregular` | a Polar packet's device time advanced by less than half the expected span; the last accepted spacing is reused |
+| `truncated` | a malformed Polar packet was dropped (its samples cannot be placed in time); the next packet shows the gap |
+| `reanchor` | the serial GSR time axis was re-anchored because the Arduino rebooted (`millis()` went backwards) |
+| `pmd-start`, `pmd-stop` | Polar's answer to a start/stop command: status, the FACTOR if the sensor sent one, and the raw response bytes (a failed start shows up here) |
 
 ### `SYNC summary` columns
 
@@ -220,9 +223,10 @@ devices. For a whole-session skew fit, use the `SYNC per-packet` lines of the AU
   (Lyra measured 221 ms median) and does not correct device clock
   drift online. At 50 ppm that is 180 ms per hour. Correct linearly with the SYNC fit if you
   need sub-second cross-device timing.
-- **Verity Sense ACC is in raw counts.** Compressed ACC frames need a per-device scale factor
-  (sent by the sensor in its start-measurement response) to become mG. The console records that
-  response verbatim in `LINK EVENTS` (`pmd-start`) but does not apply it.
+- **Verity Sense scaling depends on the FACTOR in the start response.** Compressed ACC and PPG
+  frames are scaled the way the official Polar SDK does it (ACC: counts × FACTOR × 1000 = mG).
+  If a firmware sends no FACTOR, the values stay raw counts; `pmd-start` in `LINK EVENTS` shows
+  whether one was received.
 - **Polar reconnect was verified with a simulated device only** (see `tests/`). It follows the
   existing Lyra reconnect logic, but a real H10 dropout still needs checking.
 - **All data lives in memory** until written. Hours-long recordings at full rate use hundreds of
@@ -231,8 +235,9 @@ devices. For a whole-session skew fit, use the `SYNC per-packet` lines of the AU
   group; the FULL file is the one to keep.
 - **GSR µS values are uncalibrated**, and the Grove formula's polarity was inverted on our module
   (decided from data, see `docs/technical-reference.md`). Report `GSR_raw` or state the formula.
-- **Arduino clocks drift.** Boards with a ceramic resonator can be off by up to about 0.5 %; every 2 s of
-  accumulated drift the GSR axis is re-anchored (logged as `reanchor`).
+- **Arduino clocks drift.** Boards with a ceramic resonator can be off by up to about 0.5 %. The
+  GSR axis tracks it smoothly (sample spacing stretched or compressed by at most 1 %); a slow
+  board clock leaves the axis up to about 0.15 s behind (drift × 30 s window).
 - **The Lyra EDA channel did not pass physiological validation on our unit** (details below).
 - Supported Polar models are H10 and Verity Sense only.
 
@@ -315,7 +320,20 @@ available (it is skipped otherwise): it checks that the page loads without error
 browsers without Web Bluetooth / Web Serial get a clear message, and drives a simulated H10 and
 Arduino (`tests/helpers/fake-devices.js`) through connect, record, dropout, reconnect and stop,
 then checks the resulting CSV files: headers, timestamps, sample values, link events and SYNC
-sections.
+sections. A simulated Verity Sense sends compressed ACC (odd 9-bit deltas, FACTOR in the start
+response) and compressed PPG. Two more cases cover reconnect races: the link dropping again
+while the streams are being restarted, and the user pressing Stop during the restart.
+
+`tests/polar-sdk-vectors.test.mjs` additionally checks the decoder against the PMD packets in the
+official [Polar BLE SDK](https://github.com/polarofficial/polar-ble-sdk) unit tests (ECG, H10 ACC,
+compressed ACC and PPG, timestamp rules). The SDK's licence does not allow copying its files
+here, so the test reads them from a local clone and is skipped without one:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/polarofficial/polar-ble-sdk.git
+git -C polar-ble-sdk sparse-checkout set --no-cone '/sources/Android/android-communications/**/pmd/**'
+POLAR_SDK_DIR=$PWD/polar-ble-sdk node --test
+```
 
 ## Repository layout
 
