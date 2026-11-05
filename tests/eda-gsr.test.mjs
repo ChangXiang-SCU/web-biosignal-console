@@ -104,8 +104,13 @@ test('GSR 换算：Grove 原式与极性镜像', () => {
 /* ---------- 串口时钟 ---------- */
 function runClock(lines, opt){
   const clk = new C.SerialClock(opt);
-  return lines.map(([dev, arr]) => ({ dev, arr, ...clk.map(dev, arr) }));
+  return lines.map(([dev, arr, truth]) => ({ dev, arr, truth, ...clk.map(dev, arr) }));
 }
+function assertMonotonic(out, label){
+  for (let i = 1; i < out.length; i++) assert.ok(out[i].hostMs > out[i - 1].hostMs, `${label}: not monotonic at ${i}: ${out[i - 1].hostMs} -> ${out[i].hostMs}`);
+}
+let seed = 7;
+const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 
 test('串口时钟：正常 10 Hz，间隔完全来自 millis', () => {
   const lines = Array.from({ length: 100 }, (_, i) => [5000 + i * 100, 1e12 + i * 100 + 3 + (i % 3)]);
@@ -125,6 +130,23 @@ test('串口时钟：主机卡顿 3 s 后一阵积压，时间轴不留永久偏
   const out = runClock(lines);
   assert.ok(out.every(o => o.event === null), 'no re-anchor');
   close(out[299].hostMs, 1e12 + 29900 + 5, 1e-6);   // 首行锚点含 5 ms 传输延迟
+  assertMonotonic(out, 'stall 3 s');
+});
+
+test('串口时钟：长卡顿 7.5 / 8 / 12 / 30 s 也不倒退、不留偏移', () => {
+  for (const stallS of [7.5, 8, 12, 30]) {
+    const stallLines = Math.round(stallS * 10), lines = [];
+    for (let i = 0; i < 1200; i++){
+      const dev = i * 100;
+      let arr = 1e12 + dev + 5;
+      if (i >= 200 && i < 200 + stallLines) arr = 1e12 + (200 + stallLines) * 100 + 5;
+      lines.push([dev, arr]);
+    }
+    const out = runClock(lines);
+    assertMonotonic(out, `stall ${stallS} s`);
+    assert.ok(out.every(o => o.event === null), `stall ${stallS} s: no events`);
+    for (const o of out) assert.ok(Math.abs(o.hostMs - (1e12 + o.dev + 5)) < 1, `stall ${stallS} s: offset error ${o.hostMs - (1e12 + o.dev + 5)}`);
+  }
 });
 
 test('串口时钟：板子复位（millis 倒退）立即重锚', () => {
@@ -135,20 +157,23 @@ test('串口时钟：板子复位（millis 倒退）立即重锚', () => {
   close(out[3].hostMs, 1e12 + 300, 1e-9);
 });
 
-test('串口时钟：板子钟偏慢 0.3%，持续迟到超阈值才平移，且只平移最小迟到量', () => {
-  const lines = [];
-  for (let i = 0; i < 12000; i++) lines.push([i * 100 * (1 - 0.003), 1e12 + i * 100 + 5]);   // 20 分钟
-  const out = runClock(lines);
-  const ev = out.filter(o => o.event);
-  assert.ok(ev.length >= 1 && ev.every(o => o.event.startsWith('slow')));
-  // 任何时刻映射误差都不超过阈值 + 窗口内漂移
-  for (const o of out) assert.ok(o.arr - o.hostMs > -100 && o.arr - o.hostMs < 2000 + 50 * 0.3 + 10);
-});
-
-test('串口时钟：板子钟偏快，数据「早到」超阈值时重锚', () => {
-  const lines = [];
-  for (let i = 0; i < 9000; i++) lines.push([i * 100 * 1.003, 1e12 + i * 100 + 5]);
-  const out = runClock(lines);
-  assert.ok(out.some(o => o.event && o.event.startsWith('early')));
-  for (const o of out) assert.ok(o.hostMs - o.arr <= 2000 + 1);
+test('串口时钟：板子钟偏快 / 偏慢 0.3% 和 0.5%、带随机传输延迟，录 1 小时始终单调，误差 < 200 ms', () => {
+  for (const ppm of [3000, -3000, 5000, -5000]) {
+    const lines = [];
+    for (let i = 0; i < 36000; i++){
+      const truth = 1e12 + i * 100;                        // 这一行真实产生的主机时刻
+      lines.push([i * 100 * (1 + ppm / 1e6), truth + 3 + 30 * rnd() ** 4, truth]);
+    }
+    const out = runClock(lines);
+    assertMonotonic(out, `${ppm} ppm`);
+    assert.ok(out.every(o => o.event === null), `${ppm} ppm: no re-anchor`);
+    let worst = 0;
+    for (const o of out) worst = Math.max(worst, Math.abs(o.hostMs - o.truth));
+    assert.ok(worst < 200, `${ppm} ppm: worst error ${worst.toFixed(1)} ms`);
+    // 采样间隔最多被拉伸或压缩 1%
+    for (let i = 1; i < out.length; i++) {
+      const d = out[i].hostMs - out[i - 1].hostMs, dd = out[i].dev - out[i - 1].dev;
+      assert.ok(d >= dd * 0.99 - 1e-3 && d <= dd * 1.01 + 1e-3, `${ppm} ppm spacing ${d} vs ${dd}`);   // 1e12 量级的 double 精度约 1e-4 ms
+    }
+  }
 });

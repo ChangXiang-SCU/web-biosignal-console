@@ -35,11 +35,18 @@ test('包内时间戳：丢一包 → 用上次实测间隔排样本，并报告
   assert.equal(c.times[72], 1000 + 3 * 73 * step);
 });
 
-test('包内时间戳：设备时间倒退 → backwards，不采信', () => {
+test('包内时间戳：设备时间倒退 → backwards；往前走但太短 → irregular；都不采信、沿用上次间隔', () => {
   const a = C.packetSampleTimes(1000, undefined, 10, 5);
   const b = C.packetSampleTimes(900, a.next, 10, 5);
   assert.equal(b.backwards, true);
+  assert.equal(b.irregular, false);
   assert.equal(b.step, 5);
+  const m = C.packetSampleTimes(1049, a.next, 10, 5);               // 4.9 ms/样本，采信
+  const c = C.packetSampleTimes(1049 + 10, m.next, 10, 5);          // 1 ms/样本：时间往前，但不到一半
+  assert.equal(c.irregular, true);
+  assert.equal(c.backwards, false);
+  close(c.step, 4.9, 1e-9, 'keeps last accepted step');
+  assert.equal(c.gapMs, 0);
 });
 
 test('主机时间轴：H10 钟停在 2019 年、EDA 钟正确，unix_host_ms 仍然对齐', () => {

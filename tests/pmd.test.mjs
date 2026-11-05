@@ -101,8 +101,64 @@ test('截断包：解出完整的部分并标 truncated，不抛错', () => {
   assert.deepEqual(q.channels, [[5]]);
 });
 
+test('只解官方 SDK 也支持的帧类型：压缩 ECG、PPG 非 0 帧、压缩 ACC 帧 2 以上都标为不支持', () => {
+  assert.equal(C.parsePmdPacket(deltaPacket(0, 1, 0x80, [1], 3, [{ bits: 4, deltas: [[1]] }])).supported, false);
+  assert.equal(C.parsePmdPacket(deltaPacket(1, 1, 0x87, [1, 2, 3, 4], 3, [{ bits: 4, deltas: [[1, 1, 1, 1]] }])).supported, false);
+  assert.equal(C.parsePmdPacket(deltaPacket(2, 1, 0x82, [1, 2, 3], 2, [{ bits: 4, deltas: [[1, 1, 1]] }])).supported, false);
+  assert.equal(C.parsePmdPacket(deltaPacket(2, 1, 0x81, [1, 2, 3], 2, [{ bits: 4, deltas: [[1, 1, 1]] }])).supported, true);
+});
+
 test('未知类型 / 帧类型：supported=false，不抛错', () => {
   const p = C.parsePmdPacket(Uint8Array.from([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2]));
   assert.equal(p.supported, false);
   assert.deepEqual(p.channels, []);
+});
+
+/* ---------- 控制点应答与 FACTOR（格式依据官方 SDK PmdSetting / BlePMDClient） ---------- */
+function startResponse(type, status, settings){
+  const out = [0xF0, 0x02, type, status, 0x00];
+  for (const [st, bytes] of settings) out.push(st, 1, ...bytes);
+  return Uint8Array.from(out);
+}
+const f32le = v => { const b = new Uint8Array(4); new DataView(b.buffer).setFloat32(0, v, true); return [...b]; };
+
+test('控制点应答：解析 TLV 设置并取出 FACTOR（float32 小端）', () => {
+  const r = C.parsePmdControlResponse(startResponse(2, 0, [[0, [0xA0, 0x01]], [2, [0x08, 0x00]], [5, f32le(2.44e-4)]]));
+  assert.equal(r.ok, true);
+  assert.equal(r.opcode, 2);
+  assert.equal(r.type, 2);
+  assert.equal(r.status, 0);
+  assert.deepEqual(r.settings[0], [416]);
+  assert.deepEqual(r.settings[2], [8]);
+  assert.equal(r.factor, Math.fround(2.44e-4));
+});
+
+test('控制点应答：没有参数、失败状态、未知设置类型、截断都不抛错', () => {
+  assert.equal(C.parsePmdControlResponse(Uint8Array.from([0xF0, 0x02, 0x00, 0x00, 0x00])).factor, null);
+  const bad = C.parsePmdControlResponse(Uint8Array.from([0xF0, 0x02, 0x02, 0x08, 0x00]));
+  assert.equal(bad.status, 8);
+  assert.equal(bad.factor, null);
+  const unknown = C.parsePmdControlResponse(Uint8Array.from([0xF0, 0x02, 0x02, 0x00, 0x00, 0x7F, 0x01, 0x00, 0x05, 0x01, ...f32le(0.5)]));
+  assert.equal(unknown.factor, null, 'stop at unknown setting type');
+  const cut = C.parsePmdControlResponse(Uint8Array.from([0xF0, 0x02, 0x02, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00]));
+  assert.equal(cut.factor, null);
+  assert.equal(C.parsePmdControlResponse(Uint8Array.from([0x0F, 0x01])).ok, false);
+});
+
+test('FACTOR 换算规则：ACC 0x80 → ×factor×1000（mG），ACC 0x81 / PPG 压缩 → ×factor，未压缩帧不动', () => {
+  const ref = [1905, 27376, -29282];
+  const blocks = [{ bits: 10, deltas: [[190, -105, -85]] }];
+  const pk80 = C.parsePmdPacket(deltaPacket(2, 1, 0x80, ref, 2, blocks));
+  const f = 2.44e-4;
+  // 期望值按官方 AccDataTest 的写法：(factor * sample * 1000f).toInt()
+  const expect = v => Math.trunc(Math.fround(Math.fround(Math.fround(f) * v) * 1000));
+  assert.deepEqual(C.applyPmdFactor(pk80, f), [[expect(1905), expect(2095)], [expect(27376), expect(27271)], [expect(-29282), expect(-29367)]]);
+  const pk81 = C.parsePmdPacket(deltaPacket(2, 1, 0x81, [-15, 20, 1008], 2, [{ bits: 6, deltas: [[-5, -3, 0]] }]));
+  assert.deepEqual(C.applyPmdFactor(pk81, 1), pk81.channels);
+  assert.deepEqual(C.applyPmdFactor(pk81, 0.5), [[-7, -10], [10, 8], [504, 504]]);
+  const ppg = C.parsePmdPacket(deltaPacket(1, 1, 0x80, [100, 200, 300, 400], 3, [{ bits: 11, deltas: [[1, 2, 3, -4]] }]));
+  assert.deepEqual(C.applyPmdFactor(ppg, 1), ppg.channels);
+  const h10 = C.parsePmdPacket(h10AccPacket(1, [[1, 2, 3]]));
+  assert.deepEqual(C.applyPmdFactor(h10, 2.44e-4), h10.channels, 'raw H10 ACC is already mG');
+  assert.deepEqual(C.applyPmdFactor(pk80, null), pk80.channels, 'no factor → raw counts');
 });
