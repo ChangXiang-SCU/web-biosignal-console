@@ -529,23 +529,62 @@ function applyPmdFactor(pk, factor){
    n       本包样本数
    nominal 标称采样间隔 ms
    规则：最后一个样本 = endMs，往前按间隔排。间隔优先用「相邻两包时间戳差 / 样本数」，
-   它落在标称值的 0.5–1.5 倍之内才采信；否则沿用上一次采信的间隔（没有就用标称值），并报告：
-     gapMs      间隔偏大：丢包或断流，缺口长度
-     backwards  设备时间没往前走（时间戳倒退或重复）
-     irregular  时间往前走了，但比 n 个样本应占的时间短一半以上（包重叠或标称采样率不对） */
+   它落在标称值的 0.5–1.5 倍之内才采信并记住；其余情况：
+     gapMs      间隔偏大：丢包或断流。沿用上一次采信的间隔（没有就用标称值），报告缺口长度
+     irregular  时间往前走了，但不到 n 个样本应占时间的一半：本包按实测间隔压紧排，保证不和上一包重叠，
+                不记住这个间隔
+     backwards  设备时间没往前走（倒退或重复）：drop=true，本包不出样本，next 保持上一包，
+                时间轴始终单调。大幅跳变（设备重启、被对表）由 DeviceClockGuard 先处理掉，到不了这里 */
 function packetSampleTimes(endMs, prev, n, nominal){
-  let step = (prev && prev.step) || nominal;
+  let step = (prev && prev.step) || nominal, use = step;
   let gapMs = 0, backwards = false, irregular = false;
   if(prev && prev.end != null && n > 0){
     const measured = (endMs - prev.end) / n;
-    if(measured > nominal * 0.5 && measured < nominal * 1.5) step = measured;
+    if(measured > nominal * 0.5 && measured < nominal * 1.5) step = use = measured;
     else if(measured >= nominal * 1.5) gapMs = (endMs - prev.end) - n * step;
     else if(measured <= 0) backwards = true;
-    else irregular = true;
+    else { irregular = true; use = measured; }
   }
+  if(backwards) return { times: [], drop: true, step, gapMs, backwards, irregular, next: prev };
   const times = new Array(n);
-  for(let i = 0; i < n; i++) times[i] = Math.round((endMs - (n - 1 - i) * step) * 1000) / 1000;
-  return { times, step, gapMs, backwards, irregular, next: { end: endMs, step } };
+  for(let i = 0; i < n; i++) times[i] = Math.round((endMs - (n - 1 - i) * use) * 1000) / 1000;
+  return { times, drop: false, step, gapMs, backwards, irregular, next: { end: endMs, step } };
+}
+
+/* ---------------- 设备时钟跳变 ----------------
+   PMD 时间戳来自设备 RTC，而 hostOffset 只在首包锚定一次。设备重启（RTC 回到出厂时刻）或被别的 App
+   对表时，时间戳会整段跳走：往回跳会让时间轴倒退，往前跳会把数据挪到几年以后。
+   DeviceClockGuard 以每包到达主机的时刻为参照，L = 到达时刻 − (设备时刻 + 平移) − 首包偏移：
+     · 设备比主机快出 jumpMs 以上（L < −jumpMs）：往前跳。主机卡顿只会让包迟到，不会让它提前，所以不会误判。
+     · 设备时间比这一路上一包还早，且慢了 jumpMs 以上：往回跳。只是迟到（主机卡顿、BLE 拥塞）时设备时间
+       照样往前走，不会触发。
+   跳变后加一个平移量，让设备时间接着主机时间走。一台设备的各路数据共用一个 guard；跳变那一刻另一路还在
+   路上的旧包，10 s 内用旧平移量还对得上的，照旧用旧的。jumpMs 默认 30 s，远大于 BLE 延迟和几小时的钟漂。 */
+class DeviceClockGuard{
+  constructor(opt){
+    opt = opt || {};
+    this.jumpMs = opt.jumpMs || 30000;
+    this.graceMs = opt.graceMs || 10000;
+    this.base = null; this.shifts = [{ s: 0, since: -Infinity }]; this.lastRaw = {};
+  }
+  map(stream, raw, arrival){
+    const last = this.lastRaw[stream];
+    this.lastRaw[stream] = raw;
+    if(this.base === null){ this.base = arrival - raw; return { devMs: raw, event: null, jumpMs: 0 }; }
+    const L = s => arrival - (raw + s) - this.base;
+    const cur = this.shifts[this.shifts.length - 1];
+    if(Math.abs(L(cur.s)) < this.jumpMs) return { devMs: raw + cur.s, event: null, jumpMs: 0 };
+    if(arrival - cur.since < this.graceMs){
+      for(let i = this.shifts.length - 2; i >= 0; i--)
+        if(Math.abs(L(this.shifts[i].s)) < this.jumpMs) return { devMs: raw + this.shifts[i].s, event: null, jumpMs: 0 };
+    }
+    const ahead = L(cur.s) < -this.jumpMs, behind = last != null && raw <= last && L(cur.s) > this.jumpMs;
+    if(!ahead && !behind) return { devMs: raw + cur.s, event: null, jumpMs: 0 };   // 只是迟到
+    const s = arrival - raw - this.base;
+    this.shifts.push({ s, since: arrival });
+    if(this.shifts.length > 4) this.shifts.shift();
+    return { devMs: raw + s, event: 'jump', jumpMs: cur.s - s };   // 设备钟跳了多少，正 = 往前跳
+  }
 }
 
 /* ---------------- 主机时间轴 ----------------
@@ -829,7 +868,7 @@ return { EPOCH_2000_TO_1970, PMD_TYPES,
          signExtend, readIntLE, readBitsLE,
          parsePmdHeader, readRawFrames, decodeDeltaFrames, parsePmdPacket,
          parsePmdControlResponse, applyPmdFactor,
-         packetSampleTimes, hostOffset, hostMs, fitClockPairs,
+         packetSampleTimes, DeviceClockGuard, hostOffset, hostMs, fitClockPairs,
          csvDeviceBlocks, csvField,
          cobsDecode, cobsEncode, pbVarint, pbParseEdaBuffer, pbEncodeTimestamp,
          fitCircle, EdaProc, parseGsrLine, gsrToOhm, SerialClock };
@@ -1442,7 +1481,8 @@ ecg_timestep=1000/130; H10_rate=0xC8; acc_timestep=1000/H10_rate;
 //   设备时间戳每包只前进 177.65 ms ≈ 202.6 Hz）。用相邻两包时间戳差 / 样本数得到真实间隔。
 // ★ 2026-11 修：PMD 时间戳是本包「最后一个」样本的时刻，原来把它当成了最后一个样本之后
 //   一个间隔，整条时间轴早了一个采样间隔（ECG 7.7 ms、ACC 5 ms，两路还不一样）。
-//   另外断流后的缺口现在会写进 LINK EVENTS（event=gap）。数学见 BSCore.packetSampleTimes。
+//   另外断流后的缺口现在会写进 LINK EVENTS（event=gap）。设备时间没往前走的包整包丢弃（返回 null），
+//   时间轴始终单调；数学见 BSCore.packetSampleTimes。
 var lastPacketDevTime = {};   // lastPacketDevTime[dev][type] = {end, step}
 
 function fillTimeArray(Type,devicename,packetEndMs,dTime,num,step){
@@ -1452,7 +1492,7 @@ function fillTimeArray(Type,devicename,packetEndMs,dTime,num,step){
   lastPacketDevTime[devicename][Type] = r.next;
   const tn = BSCore.PMD_TYPES[Type]||Type;
   if(r.gapMs > 0) logLinkEvent(devicename, 'gap', `${tn} ${r.gapMs.toFixed(0)} ms`);
-  else if(r.backwards) logLinkEvent(devicename, 'clock-backwards', `${tn}`);
+  else if(r.backwards) logLinkEvent(devicename, 'clock-backwards', `${tn} ${(packetEndMs-prev.end).toFixed(3)} ms，丢弃 ${num} 个样本`);
   else if(r.irregular) logLinkEvent(devicename, 'clock-irregular', `${tn} ${((packetEndMs-prev.end)/num).toFixed(3)} ms/样本`);
   if(starttime[devicename]===undefined && num>0){
     const first = r.times[0], lag = packetEndMs - first;
@@ -1460,7 +1500,7 @@ function fillTimeArray(Type,devicename,packetEndMs,dTime,num,step){
     starttime[devicename]=first;              // 首样本的设备时刻
     systemStartUTC[devicename]=dTime-lag;     // 同一样本在主机钟上的时刻（含一次传输延迟）
   }
-  return r.times;
+  return r.drop ? null : r.times;
 }
 
 function createArray(length){var arr=new Array(length||0),i=length;if(arguments.length>1){var args=Array.prototype.slice.call(arguments,1);while(i--) arr[length-1-i]=createArray.apply(this,args);}return arr;}
@@ -1566,6 +1606,7 @@ function printcontrolvalue(event){
   }
 }
 var pmdFactor = {};   // pmdFactor[dev][type] = 启动应答里的 FACTOR
+var clockGuard = {};  // clockGuard[dev] = BSCore.DeviceClockGuard，一台设备的各路数据共用
 firstTime=0;graph_time=[]; dataoutput='';
 
 function saveCsv(tag, csvString) {
@@ -1821,10 +1862,14 @@ function printHeartRate(event){
   //   奇数位宽解不对；按字节数而不是样本数切块会多出假样本；ECG 只读了 3 字节里的低 2 字节。
   let pk;
   try{ pk=BSCore.parsePmdPacket(u8); }catch(e){ console.warn('PMD parse', devicename, e); return; }
-  var devicetime=pk.devMs;
   var DataType=pk.type;
-
   const streamName = (DataType==1 ? 'PPG' : (DataType==0 ? 'ECG' : 'ACC'));
+  // ★ 2026-11：设备时钟大幅跳变（重启后 RTC 回到出厂时刻、被别的 App 对表）时，以到达时刻为参照
+  //   把设备时间接回主机时间轴，之后这台设备的 DevTime_us / unix_dev_ms 都是接回后的值（见 BSCore.DeviceClockGuard）。
+  if(!clockGuard[devicename]) clockGuard[devicename]=new BSCore.DeviceClockGuard();
+  const cg=clockGuard[devicename].map(DataType, pk.devMs, dataTime);
+  if(cg.event) logLinkEvent(devicename, 'clock-jump', `${streamName} 设备钟跳了 ${(cg.jumpMs/1000).toFixed(1)} s，已按到达时刻接上`);
+  var devicetime=cg.devMs;
   pushSyncPair(devicename, streamName, devicetime, dataTime);
   // 截断的包不知道丢了哪几个样本，没法把剩下的对到正确时刻：整包丢弃并记下来（官方 SDK 也是丢弃）。
   // 不更新 lastPacketDevTime，下一包会按设备时钟算出这段缺口。
@@ -1846,6 +1891,7 @@ function printHeartRate(event){
     // H10 发未压缩帧（标称 200 Hz，已是 mG），Verity Sense 发压缩帧（标称 416 Hz，乘 FACTOR 后是 mG）
     const nominal = pk.compressed ? (1000/Sense_rate) : acc_timestep;
     const ACCtime=fillTimeArray(DataType,devicename,devicetime,dataTime,ax.length,nominal);
+    if(!ACCtime) return;
     // ★ 2026-11：acc_v 原来是 |a|/16*200（= 12.5×|a|），和文档写的 √(x²+y²+z²) 对不上，
     //   在 H10 卡片 ±2000 的纵轴上也画不出来。现在就是合向量，单位同 acc_x/y/z（H10 为 mG）。
     const av=ax.map((_,i)=>Math.round(Math.hypot(ax[i],ay[i],az[i])));
@@ -1856,6 +1902,7 @@ function printHeartRate(event){
   if (DataType == 0){
     const ECGdata=pk.channels[0];                 // µV
     const ECGtime=fillTimeArray(DataType,devicename,devicetime,dataTime,ECGdata.length,ecg_timestep);
+    if(!ECGtime) return;
     pushData(devicename,['ECG'],ECGtime,[ECGdata]);
     resolution=(layoutCombined[devicename].yaxis.range[1]-layoutCombined[devicename].yaxis.range[0])/(COMBINED_H-100);
     Reduce(devicename,dataobject,'ECG','ECG_reduced',resolution);
@@ -1868,6 +1915,7 @@ function printHeartRate(event){
     npoints=NewPPG[0].length;
     for (i=0;i<npoints;i++){PPGsum[i]=NewPPG[0][i]+NewPPG[1][i]+NewPPG[2][i]}
     const PPGtime=fillTimeArray(DataType,devicename,devicetime,dataTime,npoints,1000/samplerate);
+    if(!PPGtime) return;
 
     pushData(devicename, PPG_CHANNEL_NAMES, PPGtime, NewPPG);
 
