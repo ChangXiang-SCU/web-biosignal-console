@@ -50,7 +50,7 @@ function table(csv) {
   return { header, rows };
 }
 
-test('page e2e', { skip: skipReason, timeout: 90_000 }, async (t) => {
+test('page e2e', { skip: skipReason, timeout: 180_000 }, async (t) => {
   let browser;
   try { browser = await chromium.launch(); }
   catch (e) { t.skip('chromium failed to launch: ' + e.message); return; }
@@ -184,7 +184,8 @@ test('page e2e', { skip: skipReason, timeout: 90_000 }, async (t) => {
       assert.equal(gsr.header[0], 'DevTime_us@GSR 1a86:7523');
       assert.ok(gsr.rows.length > 60, 'GSR rows ' + gsr.rows.length);
       const gdt = gsr.rows.slice(1).map((r, i) => Number(r[1]) - Number(gsr.rows[i][1]));
-      for (const d of gdt) assert.ok(Math.abs(d - 100) < 1e-6, `GSR step ${d}`);
+      // 间隔来自板子 millis（100 ms），串口时钟追踪漂移时最多拉伸或压缩 1%；时间轴必须单调
+      for (const d of gdt) assert.ok(d >= 99 - 1e-3 && d <= 101 + 1e-3, `GSR step ${d}`);
       assert.ok(gsr.rows.every(r => r[3] !== '' && r[4] !== ''), 'GSR raw / uS present');
 
       // ---- RAW 手动导出：逐包 SYNC 只带 ECG 这一路 ----
@@ -210,6 +211,131 @@ test('page e2e', { skip: skipReason, timeout: 90_000 }, async (t) => {
       const autoTbl = table(autoText);
       assert.equal(autoTbl.header.length, 4, 'AUTO ECG: only the H10 block');
 
+      assert.deepEqual(errors, []);
+      await ctx.close();
+    });
+
+    await t.test('假 Verity Sense：压缩 ACC（9 bit 奇数位宽 + FACTOR）和压缩 PPG（11 bit）', async () => {
+      const { ctx, page, errors } = await openPage(browser, { locale: 'zh-CN', init: FAKE });
+      page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
+      await page.evaluate(() => { window.__fake.next = 'sense'; });
+      await page.click('#Sense');
+      await page.waitForSelector('[id="card_Polar_Sense_TEST0002"]');
+      await page.click('#btnRec');
+      await page.waitForFunction(() => recordingActive === true);
+      await sleep(2500);
+      await page.click('#btnRec');
+      await page.waitForFunction(() => recordingActive === false);
+      await sleep(500);
+
+      const st = await page.evaluate(() => {
+        const F = window.__fake, dev = 'Polar Sense TEST0002';
+        const accPk = F.sense.running[2].packets, ppgPk = F.sense.running[1].packets;
+        const k = Math.fround(F.SENSE_ACC_FACTOR * 1000);
+        const nAcc = accPk.length * 36, nPpg = ppgPk.length * 25;
+        return {
+          accPk, ppgPk,
+          accExpect: Array.from({ length: nAcc }, (_, i) => F.senseAccRaw(i).map(v => Math.trunc(Math.fround(v * k)) + 0)),   // +0：-0 归一
+          ppgExpect: Array.from({ length: nPpg }, (_, i) => F.sensePpgRaw(i)),
+          fullACC: buildDataMatrixOnlyCsv(['acc_x', 'acc_y', 'acc_z', 'acc_v'], 'ACC'),
+          fullPPG: buildDataMatrixOnlyCsv(streamsPresent(PPG_EXPORT_COLUMNS), 'PPG'),
+          log: window.dropLog.filter(e => e.dev === dev).map(e => e.ev + ' ' + e.detail),
+        };
+      });
+
+      // 启动应答里的 FACTOR 进了 LINK EVENTS
+      assert.ok(st.log.some(l => l.startsWith('pmd-start ACC Success factor 0.0002')), st.log.join(' | '));
+
+      const acc = table(st.fullACC);
+      assert.equal(acc.header[0], 'DevTime_us@Polar Sense TEST0002');
+      assert.equal(acc.rows.length, st.accPk.length * 36);
+      acc.rows.forEach((r, i) => {
+        const [x, y, z, v] = r.slice(3).map(Number);
+        assert.deepEqual([x, y, z], st.accExpect[i], `ACC row ${i}`);
+        assert.equal(v, Math.round(Math.hypot(x, y, z)));
+      });
+      // 静止那一轴（z ≈ 4096 计数）换算后约 1 g = 1000 mG
+      assert.ok(Math.abs(Number(acc.rows[0][5]) - 1000) < 20, 'z ≈ 1 g in mG: ' + acc.rows[0][5]);
+      for (const p of st.accPk) assert.ok(Math.abs(Number(acc.rows[p.k0 + p.n - 1][0]) - p.end * 1000) <= 1, 'ACC last sample = packet ts');
+
+      const ppg = table(st.fullPPG);
+      assert.deepEqual(ppg.header.slice(3, 7), ['PPG0', 'PPG1', 'PPG2', 'ambient'].map(c => c + '@Polar Sense TEST0002'));
+      assert.equal(ppg.rows.length, st.ppgPk.length * 25);
+      ppg.rows.forEach((r, i) => assert.deepEqual(r.slice(3, 7).map(Number), st.ppgExpect[i], `PPG row ${i}`));
+      for (const p of st.ppgPk) assert.ok(Math.abs(Number(ppg.rows[p.k0 + p.n - 1][0]) - p.end * 1000) <= 1, 'PPG last sample = packet ts');
+
+      assert.deepEqual(errors, []);
+      await ctx.close();
+    });
+
+    async function startH10(locale = 'zh-CN'){
+      const o = await openPage(browser, { locale, init: FAKE });
+      o.page.on('dialog', d => { o.errors.push('dialog: ' + d.message()); d.dismiss(); });
+      await o.page.click('#Sense');
+      await o.page.waitForSelector('[id="card_Polar_H10_TEST0001"]');
+      await o.page.click('#btnRec');
+      await o.page.waitForFunction(() => recordingActive === true);
+      await sleep(1500);
+      return o;
+    }
+
+    await t.test('重连恢复数据流时又断开：只有一个重连循环，最后两路都在录', async () => {
+      const { ctx, page, errors } = await startH10();
+      await page.evaluate(() => {
+        const P = window.__fake.polar;
+        P.writeDelay = 60;
+        let armed = false;
+        P.simulateDrop(0);
+        // 第一次重连成功、正在发第一条开始命令时再断一次，之后 3 s 内连不上
+        P.onWrite = (u8, conn) => { if (!armed && u8[0] === 2 && conn >= 2) { armed = true; setTimeout(() => P.simulateDrop(3000), 10); } };
+      });
+      await page.waitForFunction(() => {
+        const P = window.__fake.polar;
+        return window.dropLog.some(e => e.ev === 'reconnect') && P.gatt.connected && P.running[0]?.timer && P.running[2]?.timer;
+      }, null, { timeout: 30_000 });
+      await sleep(2000);   // 如果还有第二个循环在跑，这段时间里会再连一次、再记一条 reconnect
+      const st = await page.evaluate(() => {
+        const P = window.__fake.polar;
+        const writes = P.log.filter(l => l.startsWith('write '));
+        const lastConn = Math.max(...writes.map(l => Number(l.split('@conn')[1])));
+        return {
+          reconnects: window.dropLog.filter(e => e.ev === 'reconnect').map(e => e.detail),
+          flags: streamFlags['Polar H10 TEST0001'], rec: recordingActive,
+          startsOnLast: writes.filter(l => l.endsWith('@conn' + lastConn) && l.startsWith('write 2 ')).map(l => l.split(' ')[2]),
+          connectedAt: P.connId, lastConn, connected: P.gatt.connected,
+        };
+      });
+      assert.equal(st.reconnects.length, 1, JSON.stringify(st.reconnects));
+      assert.match(st.reconnects[0], /恢复 ECG\+ACC_H10/);
+      assert.deepEqual(st.flags, { ECG: true, ACC_H10: true });
+      assert.equal(st.rec, true);
+      assert.equal(st.connected, true);
+      assert.equal(st.lastConn, st.connectedAt, 'no newer connection opened by a second loop');
+      assert.deepEqual(st.startsOnLast.sort(), ['0', '2'], 'each stream started exactly once on the live link');
+      assert.deepEqual(errors, []);
+      await ctx.close();
+    });
+
+    await t.test('重连恢复数据流时点停止：停掉的流不会被重新打开', async () => {
+      const { ctx, page, errors } = await startH10();
+      await page.evaluate(() => {
+        const P = window.__fake.polar;
+        let armed = false;
+        P.simulateDrop(0);
+        // 重连成功后刚发出 ECG 的开始命令，用户就点了停止
+        P.onWrite = (u8, conn) => { if (!armed && u8[0] === 2 && u8[1] === 0 && conn >= 2) { armed = true; setTimeout(() => UI.toggleRecord(), 30); } };
+      });
+      await page.waitForFunction(() => window.dropLog.some(e => e.ev === 'reconnect'), null, { timeout: 15_000 });
+      await sleep(1000);
+      const st = await page.evaluate(() => ({
+        rec: recordingActive, flags: streamFlags['Polar H10 TEST0001'],
+        running: Object.fromEntries(Object.entries(window.__fake.polar.running).map(([k, v]) => [k, !!v.timer])),
+        btn: document.getElementById('btnRec').textContent,
+      }));
+      assert.equal(st.rec, false);
+      assert.deepEqual(st.flags, { ECG: false, ACC_H10: false });
+      assert.deepEqual(st.running, { 0: false, 2: false }, 'device is not streaming any more');
+      assert.equal(st.btn, '开始录制');
       assert.deepEqual(errors, []);
       await ctx.close();
     });
