@@ -4,6 +4,7 @@
 //   2. 不支持 Web Bluetooth / Web Serial 的浏览器：横幅说明 + 点按钮有提示，按钮不卡死
 //   3. 假 Polar H10 + 假串口 GSR 走完整流程：连接 → 录制 → H10 掉线、首次重连失败 → 自动重连
 //      → 停止落盘；核对 FULL / AUTO CSV 的表头、时间戳、数值、LINK EVENTS、SYNC
+//   4. 假 Verity Sense 的压缩帧和 FACTOR；重连竞态两种；H10 重启后 RTC 归零
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -336,6 +337,40 @@ test('page e2e', { skip: skipReason, timeout: 180_000 }, async (t) => {
       assert.deepEqual(st.flags, { ECG: false, ACC_H10: false });
       assert.deepEqual(st.running, { 0: false, 2: false }, 'device is not streaming any more');
       assert.equal(st.btn, '开始录制');
+      assert.deepEqual(errors, []);
+      await ctx.close();
+    });
+
+    await t.test('H10 重启、RTC 回到出厂时刻：重连后时间轴接上、不倒退、不丢包', async () => {
+      const { ctx, page, errors } = await startH10();
+      const tDrop = await page.evaluate(() => { window.__fake.polar.simulateReboot(0); return Date.now(); });
+      await page.waitForFunction(() => window.dropLog.some(e => e.ev === 'reconnect'), null, { timeout: 15_000 });
+      const tBack = await page.evaluate(() => Date.now());
+      await sleep(2500);
+      await page.click('#btnRec');
+      await page.waitForFunction(() => recordingActive === false);
+      await sleep(300);
+      const st = await page.evaluate(() => ({
+        evs: window.dropLog.map(e => e.ev + ' ' + e.detail),
+        packets: window.__fake.polar.running[0].packets,
+        fullECG: buildDataMatrixOnlyCsv(['ECG'], 'ECG'),
+        fullACC: buildDataMatrixOnlyCsv(['acc_x', 'acc_y', 'acc_z', 'acc_v'], 'ACC'),
+        ecgValues: Array.from({ length: 2000 }, (_, k) => window.__fake.ecgValue(k)),
+      }));
+      const jumps = st.evs.filter(e => e.startsWith('clock-jump'));
+      assert.equal(jumps.length, 1, st.evs.join(' | '));
+      assert.ok(!st.evs.some(e => e.startsWith('clock-backwards')), 'no packet dropped as backwards');
+      for (const [csv, label] of [[st.fullECG, 'ECG'], [st.fullACC, 'ACC']]) {
+        const tb = table(csv);
+        const host = tb.rows.map(r => Number(r[2]));
+        for (let i = 1; i < host.length; i++) assert.ok(host[i] > host[i - 1], `${label} unix_host_ms monotonic at ${i}`);
+        const big = host.slice(1).map((h, i) => h - host[i]).filter(d => d > 50);
+        assert.equal(big.length, 1, `${label}: one gap ${big}`);
+        assert.ok(big[0] > 200 && big[0] < tBack - tDrop + 1500, `${label} gap ${big[0]} vs outage ${tBack - tDrop}`);
+      }
+      const ecg = table(st.fullECG);
+      assert.equal(ecg.rows.length, st.packets.length * 73, 'every packet kept');
+      ecg.rows.forEach((r, k) => assert.equal(Number(r[3]), st.ecgValues[k] + 0, `ECG value row ${k}`));
       assert.deepEqual(errors, []);
       await ctx.close();
     });
