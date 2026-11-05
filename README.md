@@ -167,9 +167,12 @@ For Polar streams, the device timestamp of each BLE packet belongs to its **last
 earlier samples are spaced by the measured interval (packet-to-packet device time ÷ samples),
 which tracks the real output rate instead of the nominal one. `host_offset_ms` is fixed at the
 first sample of each device: host arrival time minus device time, so it includes one transport
-latency. For GSR, `unix_host_ms = millis + θ`, where θ follows the smallest `arrival − millis` seen
-in the last 30 s, changing by at most 1 % of elapsed time: host stalls do not move it, Arduino
-clock drift is tracked smoothly, and the time axis never steps backwards.
+latency. If a Polar clock jumps mid-session (`clock-jump`), `DevTime_us` and `unix_dev_ms` after
+that point are the re-joined values, not the raw sensor clock.
+
+For GSR, `unix_host_ms = millis + θ`, where θ follows the smallest `arrival − millis` seen in the
+last 30 s, changing by at most 1 % of elapsed time: host stalls do not move it, Arduino clock
+drift is tracked smoothly, and the time axis never steps backwards.
 
 ### Signal columns
 
@@ -202,8 +205,9 @@ clock drift is tracked smoothly, and the time axis never steps backwards.
 | `reconnect` | reconnected and the streams restarted (in device order, skipping any the user stopped meanwhile); `detail` gives the attempt number and the gap length. A drop during the restart is logged as a second `disconnect` and handled by the same retry loop |
 | `give-up` | 20 reconnect attempts failed; the device card is removed, data recorded so far is kept |
 | `gap` | a Polar stream skipped samples (`detail`: stream and missing milliseconds, from the device clock) |
-| `clock-backwards` | a Polar packet's device time did not advance; the last accepted sample spacing is reused |
-| `clock-irregular` | a Polar packet's device time advanced by less than half the expected span; the last accepted spacing is reused |
+| `clock-backwards` | a Polar packet's device time went back a little or repeated; that packet is dropped so the time axis stays monotonic |
+| `clock-irregular` | a Polar packet's device time advanced by less than half the expected span; its samples are squeezed into that span so they do not overlap the previous packet |
+| `clock-jump` | a Polar device clock jumped by more than 30 s against host arrival time (sensor rebooted and its clock reset, or another app set it); the device time is re-joined to the host axis from that packet on |
 | `truncated` | a malformed Polar packet was dropped (its samples cannot be placed in time); the next packet shows the gap |
 | `reanchor` | the serial GSR time axis was re-anchored because the Arduino rebooted (`millis()` went backwards) |
 | `pmd-start`, `pmd-stop` | Polar's answer to a start/stop command: status, the FACTOR if the sensor sent one, and the raw response bytes (a failed start shows up here) |
@@ -321,8 +325,9 @@ browsers without Web Bluetooth / Web Serial get a clear message, and drives a si
 Arduino (`tests/helpers/fake-devices.js`) through connect, record, dropout, reconnect and stop,
 then checks the resulting CSV files: headers, timestamps, sample values, link events and SYNC
 sections. A simulated Verity Sense sends compressed ACC (odd 9-bit deltas, FACTOR in the start
-response) and compressed PPG. Two more cases cover reconnect races: the link dropping again
-while the streams are being restarted, and the user pressing Stop during the restart.
+response) and compressed PPG. Further cases cover reconnect races (the link dropping again
+while the streams are being restarted, the user pressing Stop during the restart) and an H10
+that reboots mid-recording with its clock reset to the factory date.
 
 `tests/polar-sdk-vectors.test.mjs` additionally checks the decoder against the PMD packets in the
 official [Polar BLE SDK](https://github.com/polarofficial/polar-ble-sdk) unit tests (ECG, H10 ACC,
