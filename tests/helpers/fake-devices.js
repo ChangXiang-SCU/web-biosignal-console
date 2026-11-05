@@ -1,6 +1,6 @@
 /* 注入到页面里的假设备（Playwright addInitScript 用）。
    window.__fake.polar：假 Polar H10，走真实的 PMD 控制/数据特征流程，按真实 ODR 发 ECG / ACC 包，
-                         设备时钟停在 2019 年（和实测 H10 一样），可以模拟掉线、首次重连失败。
+                         设备时钟停在 2019 年（和实测 H10 一样），可以模拟掉线、首次重连失败、重启后 RTC 归零。
    window.__fake.sense：假 Verity Sense，发压缩帧：ACC 9 bit（奇数位宽）增量、启动应答带 FACTOR，
                          PPG 11 bit 增量。把 window.__fake.next 设成 'sense'，下一次「连接传感器」选到它。
    window.__fake.port： 假 Arduino GSR 串口，10 Hz 输出 "millis,adc"。
@@ -128,6 +128,13 @@
     }
     // 测试用：掉线，failMs 毫秒内的重连都失败
     simulateDrop(failMs){ this.failUntil = Date.now() + (failMs || 0); this.log.push('drop'); this._drop(true); }
+    // 测试用：设备重启。掉线，RTC 回到出厂时刻（2019-01-01），重启后从头计时
+    simulateReboot(failMs){
+      this.simulateDrop(failMs);
+      this.dev0 = Date.UTC(2019, 0, 1) - EPOCH; this.wall0 = Date.now();
+      for(const t in this.running) this.running[t].lastEnd = null;
+      this.log.push('reboot');
+    }
   }
 
   /* ---------- 假串口 GSR ---------- */
