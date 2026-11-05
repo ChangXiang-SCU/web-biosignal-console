@@ -460,25 +460,67 @@ function decodeDeltaFrames(u8, off, channels, refBytes){
 }
 
 // opt.accRefBytes：压缩 ACC 参考样本字节数（16 bit 分辨率 = 2）
+// 支持的帧类型与官方 SDK（EcgData / PpgData / AccData）一致：ECG 只有未压缩帧 0；PPG 帧 0 和压缩帧 0
+// （4 通道）；ACC 帧 0/1/2 和压缩帧 0/1。其余类型通道数不同，标 supported=false，不乱解。
 function parsePmdPacket(u8, opt){
   opt = opt || {};
   const h = parsePmdHeader(u8);
   let r = { channels: [], truncated: false }, supported = true;
   if(h.type === 0){
-    if(h.compressed) r = decodeDeltaFrames(u8, 10, 1, 3);
-    else if(h.baseFrame === 0) r = readRawFrames(u8, 10, 1, 3);
+    if(!h.compressed && h.baseFrame === 0) r = readRawFrames(u8, 10, 1, 3);
     else supported = false;
   }else if(h.type === 1){
-    if(h.compressed) r = decodeDeltaFrames(u8, 10, 4, 3);
-    else if(h.baseFrame === 0) r = readRawFrames(u8, 10, 4, 3);
-    else supported = false;
+    if(h.baseFrame !== 0) supported = false;
+    else if(h.compressed) r = decodeDeltaFrames(u8, 10, 4, 3);
+    else r = readRawFrames(u8, 10, 4, 3);
   }else if(h.type === 2){
-    if(h.compressed) r = decodeDeltaFrames(u8, 10, 3, opt.accRefBytes || 2);
+    if(h.compressed){ if(h.baseFrame <= 1) r = decodeDeltaFrames(u8, 10, 3, opt.accRefBytes || 2); else supported = false; }
     else if(h.baseFrame <= 2) r = readRawFrames(u8, 10, 3, h.baseFrame + 1);
     else supported = false;
   }else supported = false;
   return Object.assign({}, h, { name: PMD_TYPES[h.type] || null, supported,
                                 channels: r.channels, truncated: r.truncated });
+}
+
+/* ---------------- PMD 控制点应答 ----------------
+   [0]=0xF0 [1]=操作码（2 开始测量 / 3 停止）[2]=测量类型 [3]=状态（0 成功）[4]=more
+   [5..] 设置 TLV：[设置类型 1B][个数 1B][值 × 个数]，值宽度按类型（与官方 SDK PmdSetting 一致）。
+   类型 5 = FACTOR，4 字节小端 IEEE 754 float：压缩帧的原始计数要乘它才是物理单位。 */
+const PMD_SETTING_SIZE = { 0:2, 1:2, 2:2, 3:4, 4:1, 5:4, 6:16, 7:1, 8:1, 9:2, 10:4, 11:4, 12:1 };
+function parsePmdControlResponse(u8){
+  const r = { ok: u8.length >= 4 && u8[0] === 0xF0, opcode: u8[1], type: u8[2], status: u8[3],
+              more: u8.length > 4 ? u8[4] : 0, settings: {}, factor: null };
+  if(!r.ok || u8.length <= 6) return r;
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let p = 5;
+  while(p + 2 <= u8.length){
+    const st = u8[p], count = u8[p + 1], size = PMD_SETTING_SIZE[st];
+    p += 2;
+    if(size == null || p + count * size > u8.length) break;      // 未知类型或截断：后面的不可信，停
+    const vals = [];
+    for(let k = 0; k < count; k++, p += size){
+      vals.push(st === 5 ? dv.getFloat32(p, true) : (size <= 4 ? readIntLE(u8, p, size) : null));
+    }
+    r.settings[st] = vals;
+  }
+  if(r.settings[5] && r.settings[5].length) r.factor = r.settings[5][0];
+  return r;
+}
+/* 按官方 SDK（AccData / PpgData）的规则把压缩帧原始计数换成物理单位，返回新的 channels：
+     ACC 压缩帧 0（0x80，Verity Sense）：trunc(raw × factor × 1000) → mG（这类帧以 g 为单位）
+     ACC 压缩帧 1（0x81）              ：factor ≠ 1 时 trunc(raw × factor)
+     PPG 压缩帧                        ：trunc(raw × factor)
+   未压缩帧（H10 的 ECG、ACC）本来就是 µV / mG，原样返回。factor 未知（null）也原样返回。 */
+function applyPmdFactor(pk, factor){
+  if(factor == null || !pk.compressed) return pk.channels;
+  const f = Math.fround(factor);
+  const mul = (k) => pk.channels.map(ch => ch.map(v => Math.trunc(Math.fround(v * k))));
+  if(pk.type === 2){
+    if(pk.baseFrame === 0) return mul(Math.fround(f * 1000));
+    return f === 1 ? pk.channels : mul(f);
+  }
+  if(pk.type === 1) return mul(f);
+  return pk.channels;
 }
 
 /* ---------------- 包内时间戳重建 ----------------
@@ -487,20 +529,23 @@ function parsePmdPacket(u8, opt){
    n       本包样本数
    nominal 标称采样间隔 ms
    规则：最后一个样本 = endMs，往前按间隔排。间隔优先用「相邻两包时间戳差 / 样本数」，
-   它落在标称值的 0.5–1.5 倍之内才采信；超出说明丢包或断流，退回上一次采信的间隔
-   （没有就用标称值），并报告缺口长度 gapMs。 */
+   它落在标称值的 0.5–1.5 倍之内才采信；否则沿用上一次采信的间隔（没有就用标称值），并报告：
+     gapMs      间隔偏大：丢包或断流，缺口长度
+     backwards  设备时间没往前走（时间戳倒退或重复）
+     irregular  时间往前走了，但比 n 个样本应占的时间短一半以上（包重叠或标称采样率不对） */
 function packetSampleTimes(endMs, prev, n, nominal){
   let step = (prev && prev.step) || nominal;
-  let gapMs = 0, backwards = false;
+  let gapMs = 0, backwards = false, irregular = false;
   if(prev && prev.end != null && n > 0){
     const measured = (endMs - prev.end) / n;
     if(measured > nominal * 0.5 && measured < nominal * 1.5) step = measured;
     else if(measured >= nominal * 1.5) gapMs = (endMs - prev.end) - n * step;
-    else backwards = true;
+    else if(measured <= 0) backwards = true;
+    else irregular = true;
   }
   const times = new Array(n);
   for(let i = 0; i < n; i++) times[i] = Math.round((endMs - (n - 1 - i) * step) * 1000) / 1000;
-  return { times, step, gapMs, backwards, next: { end: endMs, step } };
+  return { times, step, gapMs, backwards, irregular, next: { end: endMs, step } };
 }
 
 /* ---------------- 主机时间轴 ----------------
@@ -745,50 +790,45 @@ function gsrToOhm(v10, flip){
   if(v >= 511) return null;
   return ((1024 + 2 * v) * 10000) / (512 - v);
 }
-/* 串口时钟：用板子的 millis 保持采样间隔平滑，首行对一次主机时钟。
-   重新锚定只在三种情况下发生，每次都通过 event 报出来写进 LINK EVENTS：
-     reset  millis 倒退（板子复位）
-     early  数据比映射时刻早到 thresholdMs 以上（板子时钟偏快）
-     slow   最近 windowN 行「全部」都比映射时刻晚到 thresholdMs 以上（板子时钟偏慢）；
-            只按这段窗口里的最小迟到量平移。
-   主线程卡顿造成的一阵迟到不会触发重锚：卡顿后的行马上恢复准点，窗口最小值仍然很小。
-   （旧实现只要一行迟到 2 s 就把锚点挪到这一行的到达时刻，卡顿一次就可能给整条时间轴留下几百毫秒到几秒的永久偏移。） */
+/* 串口时钟：host = millis + θ。θ 是「到达时刻 − millis」在最近 windowMs 内的最小值（传输延迟不会是负的，
+   最小值就是最接近真实的那一行），并且限速追踪：θ 每 1 ms 设备时间最多变 slew ms（默认 1%）。
+     · 主机卡顿：积压的行一起迟到，偏移变大，不影响窗口最小值，时间轴不动。
+     · 板子时钟偏快或偏慢（Uno 的陶瓷谐振器可到 0.5%）：最小值跟着漂，θ 以不超过 1% 的速度平滑跟上，
+       采样间隔最多被拉伸或压缩 1%，时间轴始终单调，没有跳变。
+     · millis 倒退（板子复位）：只能重新锚定，通过 event='reset' 报出来写进 LINK EVENTS。
+   （旧实现一行迟到 2 s 就把锚点挪到这一行的到达时刻，卡顿一次就留下永久偏移，时钟漂移时还会跳变。） */
 class SerialClock{
   constructor(opt){
     opt = opt || {};
-    this.th = opt.thresholdMs || 2000;
-    this.N = opt.windowN || 50;
-    this.t0dev = null; this.t0sys = null; this.lastDev = null; this.late = [];
+    this.windowMs = opt.windowMs || 30000;
+    this.slew = opt.slew || 0.01;
+    this.theta = null; this.lastDev = null; this.hist = [];
   }
   map(dev, arrival){
     let event = null;
-    if(this.t0dev === null){ this.t0dev = dev; this.t0sys = arrival; }
-    else if(dev < this.lastDev){ this.t0dev = dev; this.t0sys = arrival; this.late = []; event = 'reset'; }
-    this.lastDev = dev;
-    let host = this.t0sys + (dev - this.t0dev);
-    const lateness = arrival - host;
-    if(lateness < -this.th){
-      this.t0sys += lateness; host = arrival; this.late = [];
-      event = event || ('early ' + Math.round(-lateness) + ' ms');
+    const off = arrival - dev;
+    if(this.theta === null || dev < this.lastDev){
+      if(this.theta !== null) event = 'reset';
+      this.theta = off; this.hist = [];
     }else{
-      this.late.push(lateness);
-      if(this.late.length > this.N) this.late.shift();
-      if(this.late.length >= this.N){
-        const minLate = Math.min(...this.late);
-        if(minLate > this.th){
-          this.t0sys += minLate; host += minLate;
-          this.late = this.late.map(v => v - minLate);
-          event = event || ('slow ' + Math.round(minLate) + ' ms');
-        }
-      }
+      const maxStep = this.slew * (dev - this.lastDev);
+      this.hist.push([dev, off]);
+      while(this.hist.length && dev - this.hist[0][0] > this.windowMs) this.hist.shift();
+      let target = off;
+      for(const h of this.hist) if(h[1] < target) target = h[1];
+      const d = target - this.theta;
+      this.theta += Math.max(-maxStep, Math.min(maxStep, d));
     }
-    return { hostMs: host, event };
+    if(!this.hist.length) this.hist.push([dev, off]);
+    this.lastDev = dev;
+    return { hostMs: dev + this.theta, event };
   }
 }
 
 return { EPOCH_2000_TO_1970, PMD_TYPES,
          signExtend, readIntLE, readBitsLE,
          parsePmdHeader, readRawFrames, decodeDeltaFrames, parsePmdPacket,
+         parsePmdControlResponse, applyPmdFactor,
          packetSampleTimes, hostOffset, hostMs, fitClockPairs,
          csvDeviceBlocks, csvField,
          cobsDecode, cobsEncode, pbVarint, pbParseEdaBuffer, pbEncodeTimestamp,
@@ -1410,8 +1450,10 @@ function fillTimeArray(Type,devicename,packetEndMs,dTime,num,step){
   const prev = lastPacketDevTime[devicename][Type];
   const r = BSCore.packetSampleTimes(packetEndMs, prev, num, step);
   lastPacketDevTime[devicename][Type] = r.next;
-  if(r.gapMs > 0) logLinkEvent(devicename, 'gap', `${BSCore.PMD_TYPES[Type]||Type} ${r.gapMs.toFixed(0)} ms`);
-  else if(r.backwards) logLinkEvent(devicename, 'clock-backwards', `${BSCore.PMD_TYPES[Type]||Type}`);
+  const tn = BSCore.PMD_TYPES[Type]||Type;
+  if(r.gapMs > 0) logLinkEvent(devicename, 'gap', `${tn} ${r.gapMs.toFixed(0)} ms`);
+  else if(r.backwards) logLinkEvent(devicename, 'clock-backwards', `${tn}`);
+  else if(r.irregular) logLinkEvent(devicename, 'clock-irregular', `${tn} ${((packetEndMs-prev.end)/num).toFixed(3)} ms/样本`);
   if(starttime[devicename]===undefined && num>0){
     const first = r.times[0], lag = packetEndMs - first;
     if(firstTime==0){firstTime=dTime-lag}
@@ -1446,13 +1488,22 @@ function dropPolarDevice(name){
 async function onDisconnected(event){
   const name = event.target.name;
   const o = obj[name];
-  if(o && o.reconnecting) return;            // 重连过程中又断（含我们自己断开半连上的链路）：外层循环接着重试
+  if(o) o.linkGen = (o.linkGen||0) + 1;           // 每断一次加一，重连循环靠它发现「恢复数据流时又断了」
+  if(o && o.reconnectRunning){
+    // 重连循环已经在跑（包括正在恢复数据流的阶段）：只记一笔，由那个循环接着重试，绝不开第二个循环
+    if(!o.reconnecting) logLinkEvent(name, 'disconnect', '恢复数据流时再次断开');
+    o.reconnecting = true;
+    return;
+  }
   logLinkEvent(name, 'disconnect', '');
   if(!o || o.closing){ dropPolarDevice(name); return; }
   o.reconnecting = true;
+  o.reconnectRunning = true;
   setCardNote(name, UI.t('link.reconnecting'));
   UI.updateStatus();
-  const ok = await polarReconnect(name, o);
+  let ok = false;
+  try{ ok = await polarReconnect(name, o); }
+  finally{ o.reconnectRunning = false; }
   if(!ok && obj[name] === o){
     logLinkEvent(name, 'give-up', `${POLAR_RECONNECT_TRIES} 次重连失败`);
     dropPolarDevice(name);
@@ -1466,10 +1517,19 @@ async function polarReconnect(name, o){
     setCardNote(name, `${UI.t('link.reconnecting')} ${attempt}/${POLAR_RECONNECT_TRIES}`);
     try{
       await pmdAttach(o);
+      const gen = o.linkGen;
       o.reconnecting = false;
-      const wanted = Object.keys(streamFlags[name]||{}).filter(k=>streamFlags[name][k]);
-      for(const s of wanted){ await ActivateStream(name, streams[s]); await sleep(120); }
-      logLinkEvent(name, 'reconnect', `第 ${attempt} 次成功，缺口 ${((Date.now()-t0)/1000).toFixed(1)} s，恢复 ${wanted.join('+')||'无'}`);
+      // ★ 按设备输出顺序恢复（Verity Sense 要先开 SDK 模式，再开 PPG / ACC），
+      //   每开一路之前重新看 streamFlags：用户在这期间点了停止，被停掉的流不会被重新打开。
+      for(const s of (o.output || [])){
+        if(o.linkGen !== gen) break;
+        if(!(streamFlags[name] && streamFlags[name][s])) continue;
+        await ActivateStream(name, streams[s]);
+        await sleep(120);
+      }
+      if(o.linkGen !== gen || !o.device.gatt.connected) throw new Error('恢复数据流时链路又断了');
+      const restored = (o.output || []).filter(s => streamFlags[name] && streamFlags[name][s]);
+      logLinkEvent(name, 'reconnect', `第 ${attempt} 次成功，缺口 ${((Date.now()-t0)/1000).toFixed(1)} s，恢复 ${restored.join('+')||'无'}`);
       setCardNote(name, UI.t('link.reconnected'));
       UI.updateStatus();
       return true;
@@ -1490,14 +1550,22 @@ function printcontrolvalue(event){
   const response=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
   console.log(devicename, "(timeStamp=",Math.round(event.timeStamp)/1000,") ",Control_Types[response[1]], Stream_Types[response[2]], Device_Errors[response[3]]);
   // ★ 2026-11：开始/停止测量的应答写进 LINK EVENTS。启动失败（比如 Invalid sample rate）
-  //   以前只在控制台里，CSV 里那一路就是莫名其妙没数据。原始字节一并保留，
-  //   Verity Sense 压缩 ACC 的换算系数（factor）也在这串字节里，可离线解析。
+  //   以前只在控制台里，CSV 里那一路就是莫名其妙没数据。原始字节一并保留。
   if(response[0]===0xF0 && (response[1]===2 || response[1]===3)){
     const hex=Array.from(response,b=>b.toString(16).padStart(2,'0')).join(' ');
+    const cp=BSCore.parsePmdControlResponse(response);
+    // ★ 2026-11：开始测量成功时设备在应答里给出 FACTOR（压缩帧原始计数 → 物理单位的系数），
+    //   按官方 SDK 的规则在 printHeartRate 里乘上。Verity Sense 的 ACC 因此直接是 mG。
+    if(cp.opcode===2 && cp.status===0 && cp.factor!=null){
+      if(!pmdFactor[devicename]) pmdFactor[devicename]={};
+      pmdFactor[devicename][cp.type]=cp.factor;
+    }
     logLinkEvent(devicename, 'pmd-'+(response[1]===2?'start':'stop'),
-      `${Stream_Types[response[2]]||response[2]} ${Device_Errors[response[3]]||response[3]} raw ${hex}`);
+      `${Stream_Types[response[2]]||response[2]} ${Device_Errors[response[3]]||response[3]}`
+      + (cp.factor!=null ? ` factor ${cp.factor}` : '') + ` raw ${hex}`);
   }
 }
+var pmdFactor = {};   // pmdFactor[dev][type] = 启动应答里的 FACTOR
 firstTime=0;graph_time=[]; dataoutput='';
 
 function saveCsv(tag, csvString) {
@@ -1755,11 +1823,15 @@ function printHeartRate(event){
   try{ pk=BSCore.parsePmdPacket(u8); }catch(e){ console.warn('PMD parse', devicename, e); return; }
   var devicetime=pk.devMs;
   var DataType=pk.type;
-  if(pk.truncated) console.warn('PMD packet truncated', devicename, DataType, u8.length);
 
   const streamName = (DataType==1 ? 'PPG' : (DataType==0 ? 'ECG' : 'ACC'));
   pushSyncPair(devicename, streamName, devicetime, dataTime);
+  // 截断的包不知道丢了哪几个样本，没法把剩下的对到正确时刻：整包丢弃并记下来（官方 SDK 也是丢弃）。
+  // 不更新 lastPacketDevTime，下一包会按设备时钟算出这段缺口。
+  if(pk.truncated){ logLinkEvent(devicename, 'truncated', `${streamName} ${u8.length} B`); return; }
   if(!pk.supported || !pk.channels.length || !pk.channels[0].length) return;
+  // 压缩帧乘设备给的 FACTOR（规则见 BSCore.applyPmdFactor）；没收到 FACTOR 时保持原始计数
+  pk.channels = BSCore.applyPmdFactor(pk, pmdFactor[devicename]?.[DataType]);
 
   updatecombined[devicename]=true;
   if(!(devicename in intime)){intime[devicename]=devicetime;}
@@ -1771,7 +1843,7 @@ function printHeartRate(event){
 
   if (DataType == 2){
     const [ax,ay,az]=pk.channels;
-    // H10 发未压缩帧（标称 200 Hz），Verity Sense 发压缩帧（标称 416 Hz）
+    // H10 发未压缩帧（标称 200 Hz，已是 mG），Verity Sense 发压缩帧（标称 416 Hz，乘 FACTOR 后是 mG）
     const nominal = pk.compressed ? (1000/Sense_rate) : acc_timestep;
     const ACCtime=fillTimeArray(DataType,devicename,devicetime,dataTime,ax.length,nominal);
     // ★ 2026-11：acc_v 原来是 |a|/16*200（= 12.5×|a|），和文档写的 √(x²+y²+z²) 对不上，
@@ -2320,11 +2392,11 @@ function handleLine(name,line,arrival){
   /* 时间轴：有 millis 就用它保持采样间隔平滑，只用首样本对一次系统时钟。
      ★ 2026-11 修：原来任何一行和墙钟差过 2 s 就把锚点挪到这一行的到达时刻。主线程卡顿
      2 s 以上时（上面天琴座重连注释里说的掉线就是这么来的），积压的那一阵行全部「迟到」，
-     锚点被挪到迟到的时刻，之后整条 GSR 时间轴留下永久偏移（合成测试里 3 s 卡顿留下 900 ms）。现在只在板子复位、
-     板子时钟持续偏快/偏慢时重锚，并把每次重锚写进 LINK EVENTS（event=reanchor）。 */
+     锚点被挪到迟到的时刻，之后整条 GSR 时间轴留下永久偏移（合成测试里 3 s 卡顿留下 900 ms）。现在用
+     BSCore.SerialClock 平滑跟踪板子时钟漂移，卡顿不影响，时间轴单调；只有板子复位才重锚（event=reanchor）。 */
   let devMs;
   if(devMillis!=null){
-    if(!S.clock) S.clock=new BSCore.SerialClock({ thresholdMs:2000, windowN:50 });
+    if(!S.clock) S.clock=new BSCore.SerialClock();
     const m=S.clock.map(devMillis, arrival);
     devMs = m.hostMs - EPOCH_2000_TO_1970;
     if(m.event) logLinkEvent(name, 'reanchor', m.event);
